@@ -1,0 +1,33 @@
+[package]
+name = "iphone-mirror-rs"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+description = "A native Rust iPhone mirror with measured low-latency video and input"
+
+[dependencies]
+anyhow = "1"
+bytemuck = { version = "1", features = ["derive"] }
+ed25519-dalek = "2"
+ffmpeg-sys-next = { version = "8", default-features = false, features = ["avcodec"] }
+idevice = { version = "=0.1.68", default-features = false, features = ["ring", "usbmuxd", "tcp", "tunnel_tcp_stack", "remote_pairing", "display_stream", "mdns"] }
+mdns-sd = "0.17"
+plist = "1"
+pollster = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { version = "1", features = ["v4"] }
+wgpu = "25"
+winit = "0.30"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = 1
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"

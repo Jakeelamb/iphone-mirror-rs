@@ -1,0 +1,9 @@
+/target/
+*.profraw
+/profiles/
+*.hevc
+*.h265
+*.png
+*.jpg
+*.plist
+.env
