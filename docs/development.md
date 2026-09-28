@@ -1,5 +1,6 @@
 # Development
 
+For setup and pull requests, start with [CONTRIBUTING.md](../CONTRIBUTING.md).
 Use `cargo build --release --locked` for performance work. Release builds retain
 debug information for profiling and use thin LTO. Keep `Cargo.lock` alongside the
 source because `idevice`'s native CoreDevice APIs are pinned to a Git revision.
@@ -22,7 +23,8 @@ source because `idevice`'s native CoreDevice APIs are pinned to a Git revision.
 
 The process uses two Tokio workers, a blocking decoder task and the window's
 event loop. Device/GPU decoder initialization completes before the phone starts
-producing frames. Encoded packets are never arbitrarily replaced: dependent HEVC
+producing frames. A separate task polls interface orientation with bounded
+requests and retry backoff, without blocking video or HID writes. Encoded packets are never arbitrarily replaced: dependent HEVC
 pictures need earlier reference pictures. Only decoded pictures may replace an
 older unpresented picture. On detected stream loss, recovery waits for a
 keyframe; a stalled decoder handoff ends the session instead of growing memory.
@@ -31,15 +33,16 @@ keyframe; a stalled decoder handoff ends the session instead of growing memory.
 
 ```sh
 cargo fmt --all --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --all-targets
 cargo build --release --locked
 ```
 
 The normal suite includes RTP loss/order cases, HID transitions, pairing
 validation, immediate HEVC output from complete synthetic access units, decoded
-storage recycling, histogram boundaries and WGSL validation. Home button tests cover click cancellation, interrupted
-scrolling and F1 ownership; layout tests check rounded corners, touch mapping and
+storage recycling, histogram boundaries and WGSL validation. Home button tests
+cover click cancellation, interrupted scrolling and F1 ownership; layout tests
+check rounded corners, touch mapping and
 DPI scaling. Orientation tests cover both landscape directions, already-rotated
 buffers, touch release at rotation and footer-aware window fitting. These tests
 do not require a connected iPhone.
@@ -60,6 +63,7 @@ The offline surface viewer exercises window presentation:
 ```sh
 cargo run --example render_fixture
 cargo run --example render_fixture -- --hardware
+cargo run --example render_fixture -- --rotation 270
 ```
 
 Use an isolated desktop for routine UI verification. Resize between wide and

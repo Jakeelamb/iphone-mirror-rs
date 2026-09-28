@@ -60,6 +60,7 @@ install -Dm755 -s target/release/iphone-mirror-rs ~/.local/bin/iphone-mirror-rs
 ~/.local/bin/iphone-mirror-rs --connection wifi
 ```
 
+To invoke it as `iphone-mirror-rs`, include `~/.local/bin` in your PATH.
 Rebuild and repeat that install command after updating. To uninstall, remove
 `~/.local/bin/iphone-mirror-rs`. Pairing records and developer images are separate
 from the application and remain on the computer.

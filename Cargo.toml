@@ -4,7 +4,9 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.96"
 license = "GPL-3.0-or-later"
-description = "A native Rust iPhone mirror with measured low-latency video and input"
+description = "Native Linux iPhone mirroring and input with FFmpeg and wgpu"
+repository = "https://github.com/Jakeelamb/iphone-mirror-rs"
+readme = "README.md"
 
 [dependencies]
 anyhow = "1"

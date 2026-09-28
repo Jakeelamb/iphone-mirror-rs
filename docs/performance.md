@@ -7,7 +7,7 @@ frame rate does not by itself establish low end-to-end latency.
 
 ## Current evidence
 
-Release validation on 2026-09-27 (Pacific), using an iPhone 15/iOS 27,
+Release validation at revision `91b2808` on 2026-09-27 (Pacific), using an iPhone 15/iOS 27,
 1184×2576 HEVC, direct CUDA/NVDEC, AMD Radeon 890M Vulkan rendering and Immediate
 presentation on the physical Hyprland desktop:
 
@@ -34,8 +34,8 @@ explicit hardware image comparisons. Two consecutive short sessions confirmed cl
 entry including colons, successful navigation and clean shutdown. USB has not
 been live-qualified in the Rust application.
 
-The subsequent rounded-screen/Home and orientation changes pass 67 normal tests,
-formatting and all-target Clippy. A live Wi-Fi session confirmed orientation 3
+The subsequent rounded-screen/Home and orientation validation passed 67 normal
+tests, formatting and all-target Clippy at revision `3094863`. A live Wi-Fi session confirmed orientation 3
 with a portrait-encoded buffer displayed correctly in landscape, a tap opening
 the game's Settings, vertical wheel scrolling, and a tap returning to Training.
 All four GPU rotations also passed isolated synthetic pixel checks (within
