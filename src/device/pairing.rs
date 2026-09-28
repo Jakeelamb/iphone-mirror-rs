@@ -56,11 +56,9 @@ pub fn find(explicit: Option<&Path>, serial: Option<&str>) -> Result<PathBuf> {
     if let Some(path) = explicit {
         return Ok(path.to_owned());
     }
-    let data = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-        .context("HOME or XDG_DATA_HOME is required to find saved pairing")?;
-    let directory = data.join("pymobiledevice3");
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let xdg = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from);
+    let directory = pairing_directory(home.as_deref(), xdg.as_deref(), Path::is_dir)?;
     let normalized = serial.map(|s| s.replace('-', ""));
     let mut candidates = Vec::new();
     for entry in std::fs::read_dir(directory)
@@ -87,6 +85,25 @@ pub fn find(explicit: Option<&Path>, serial: Option<&str>) -> Result<PathBuf> {
         0 => bail!("no matching saved CoreDevice pairing; pair the iPhone first"),
         _ => bail!("several saved CoreDevice pairings; choose --serial or --pairing-file"),
     }
+}
+
+fn pairing_directory(
+    home: Option<&Path>,
+    xdg: Option<&Path>,
+    is_directory: impl Fn(&Path) -> bool,
+) -> Result<PathBuf> {
+    // Match pymobiledevice3's existing-installation precedence and XDG rules.
+    if let Some(legacy) = home.map(|home| home.join(".pymobiledevice3"))
+        && is_directory(&legacy)
+    {
+        return Ok(legacy);
+    }
+    let data = xdg
+        .filter(|path| path.is_absolute())
+        .map(Path::to_owned)
+        .or_else(|| home.map(|home| home.join(".local/share")))
+        .context("HOME or absolute XDG_DATA_HOME is required to find saved pairing")?;
+    Ok(data.join("pymobiledevice3"))
 }
 
 #[cfg(test)]
@@ -136,5 +153,47 @@ mod tests {
                 .to_uppercase(),
             "F095EC99-C175-33A2-B410-6E76752A1F40"
         );
+    }
+
+    #[test]
+    fn legacy_directory_takes_precedence_over_xdg() -> Result<()> {
+        let legacy = Path::new("/test-home/.pymobiledevice3");
+        assert_eq!(
+            pairing_directory(
+                Some(Path::new("/test-home")),
+                Some(Path::new("/test-data")),
+                |path| path == legacy,
+            )?,
+            legacy
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn absolute_xdg_does_not_require_home() -> Result<()> {
+        assert_eq!(
+            pairing_directory(None, Some(Path::new("/test-data")), |_| false)?,
+            Path::new("/test-data/pymobiledevice3")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn missing_empty_or_relative_xdg_uses_home_default() -> Result<()> {
+        for xdg in [None, Some(Path::new("")), Some(Path::new("relative"))] {
+            assert_eq!(
+                pairing_directory(Some(Path::new("/test-home")), xdg, |_| false)?,
+                Path::new("/test-home/.local/share/pymobiledevice3")
+            );
+            assert!(pairing_directory(None, xdg, |_| false).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_pairing_path_bypasses_discovery() -> Result<()> {
+        let path = Path::new("/explicit/pairing.plist");
+        assert_eq!(find(Some(path), Some("ignored"))?, path);
+        Ok(())
     }
 }
