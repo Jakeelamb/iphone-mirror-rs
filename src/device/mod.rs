@@ -320,17 +320,33 @@ pub struct HidChannels {
     touch: Option<[u8; 58]>,
     home_pressed: bool,
 }
+
+fn touch_states(report: &[u8; 58]) -> impl Iterator<Item = u8> + '_ {
+    // Pinned idevice mainTouchscreen format: up to five five-byte contacts.
+    let count = usize::from(report[1]).min(5);
+    (0..count).map(|slot| report[3 + slot * 5])
+}
+
+fn release_touch_contacts(report: &mut [u8; 58]) {
+    let count = usize::from(report[1]).min(5);
+    for slot in 0..count {
+        // Clear touching/in-range flags while retaining contact identity.
+        report[3 + slot * 5] &= 0x3f;
+    }
+}
+
 impl HidChannels {
     pub async fn send(&mut self, event: &crate::input::HidEvent) -> Result<()> {
         use crate::input::HidEvent;
         match event {
             HidEvent::Touch { report, .. } => {
                 // Record before awaiting: a canceled write may have reached the device.
-                if report[3] == 0xc2 {
+                let has_contact = touch_states(report).any(|state| state & 0xc0 != 0);
+                if has_contact {
                     self.touch = Some(*report);
                 }
                 self.universal.send_report(257, report.to_vec()).await?;
-                if report[3] != 0xc2 {
+                if !has_contact {
                     self.touch = None;
                 }
             }
@@ -364,7 +380,7 @@ impl HidChannels {
     pub async fn close(&mut self) -> Result<()> {
         let mut first_error = None;
         if let Some(mut report) = self.touch.take() {
-            report[3] = 2;
+            release_touch_contacts(&mut report);
             if let Err(error) = timeout(
                 Duration::from_millis(650),
                 self.universal.send_report(257, report.to_vec()),
@@ -585,8 +601,55 @@ async fn discover() -> Result<Vec<SocketAddr>> {
 
 #[cfg(test)]
 mod response_tests {
-    use super::{error_code, parse_response};
+    use super::{error_code, parse_response, release_touch_contacts, touch_states};
     use anyhow::{Context, Result};
+
+    #[test]
+    fn cleanup_releases_every_identity_and_preserves_coordinates() -> Result<()> {
+        use idevice::core_device::hid::{TouchscreenContact, build_multitouch_report};
+        for count in 0..=5 {
+            let contacts: Vec<_> = (0..count)
+                .map(|identity| TouchscreenContact {
+                    identity,
+                    touching: identity % 2 == 0,
+                    x: 1000 + u16::from(identity) * 300,
+                    y: 2000 + u16::from(identity) * 400,
+                })
+                .collect();
+            let encoded = build_multitouch_report(&contacts, Some(123))?;
+            let mut report: [u8; 58] = encoded.try_into().map_err(|_| {
+                anyhow::anyhow!("upstream touchscreen report must contain 58 bytes")
+            })?;
+            assert_eq!(
+                touch_states(&report).any(|state| state & 0xc0 != 0),
+                count != 0
+            );
+            release_touch_contacts(&mut report);
+            assert!(touch_states(&report).all(|state| state & 0xc0 == 0));
+            let released: Vec<_> = contacts
+                .into_iter()
+                .map(|contact| TouchscreenContact {
+                    touching: false,
+                    ..contact
+                })
+                .collect();
+            assert_eq!(
+                report.as_slice(),
+                build_multitouch_report(&released, Some(123))?
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn single_contact_cleanup_retains_reference_identity() {
+        let mut report = crate::input::touchscreen_report(true, 300, 400, 123);
+        release_touch_contacts(&mut report);
+        assert_eq!(
+            report,
+            crate::input::touchscreen_report(false, 300, 400, 123)
+        );
+    }
 
     #[test]
     fn diagnostic_extracts_only_numeric_codes() {
