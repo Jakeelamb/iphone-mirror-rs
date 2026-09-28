@@ -436,7 +436,9 @@ fn hid_usage(code: KeyCode) -> Option<u8> {
         Comma => 54,
         Period => 55,
         Slash => 56,
-        CapsLock => 57,
+        // Printable ASCII already carries host CapsLock in its logical value.
+        // Toggling CapsLock again remotely would invert synthesized uppercase.
+        CapsLock => return None,
         Insert => 73,
         Home => 74,
         PageUp => 75,
@@ -655,5 +657,21 @@ mod tests {
             panic!("keyboard release");
         };
         assert!(report[1..31].iter().all(|&byte| byte == 0));
+    }
+
+    #[test]
+    fn caps_lock_is_applied_by_host_character_not_toggled_on_phone() {
+        let mut app = app();
+        app.key(KeyCode::CapsLock, true);
+        app.key(KeyCode::CapsLock, false);
+        assert!(events(&app).is_empty());
+        app.key_event(KeyCode::KeyA, true, Some('A'));
+        let pressed = events(&app);
+        let Some(HidEvent::Keyboard(report)) = pressed.last() else {
+            panic!("keyboard press");
+        };
+        assert_ne!(report[1] & (1 << 4), 0);
+        assert_ne!(report[1 + 225 / 8] & (1 << (225 % 8)), 0);
+        assert_eq!(report[1 + 57 / 8] & (1 << (57 % 8)), 0);
     }
 }
