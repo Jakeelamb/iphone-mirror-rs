@@ -4,9 +4,6 @@
 //! An active DisplayService stream must exist before these reports are accepted.
 use std::collections::VecDeque;
 
-pub const TOUCHSCREEN_SERVICE_ID: u64 = 257;
-pub const KEYBOARD_SERVICE_ID: u64 = 0x1_0000_2001;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TouchPhase {
     Begin,
