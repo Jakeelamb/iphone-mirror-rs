@@ -15,22 +15,27 @@ article:nth-child(3n){background:#36532b}article:nth-child(3n+1){background:#653
 <canvas id="stamp" style="position:fixed;z-index:5;top:180px;left:0;width:100%;height:24px;image-rendering:pixelated" width="340" height="24"></canvas><script>
 const content=document.querySelector('#content');
 for(let i=0;i<100;i++)content.innerHTML+=`<article><h2>Scrolling section ${i+1}</h2><div class="bar"></div><p>A repeatable page for comparing phone mirroring. Clear text, colored panels and moving edges exercise the real screen encoder without personal content.</p></article>`;
-let offset=null,best=Infinity;
+let offset=null,syncing=false;
 async function sync(){
+  if(syncing)return;
+  syncing=true;
   const label=document.querySelector('#sync');
-  offset=null;best=Infinity;
+  let nextOffset=null,best=Infinity;
   for(let i=0;i<6;i++){
     try{
       const a=performance.now();
       const response=await fetch('/clock',{cache:'no-store',signal:AbortSignal.timeout(3000)});
       if(!response.ok)continue;
       const t=await response.json();const b=performance.now();
-      if(Number.isFinite(t)&&b-a<best){best=b-a;offset=t-(a+b)/2;}
+      if(Number.isFinite(t)&&b-a<best){best=b-a;nextOffset=t-(a+b)/2;}
     }catch{}
   }
-  label.textContent=offset===null?'Clock unavailable; motion test still running':`Clock sync RTT ${best.toFixed(2)} ms; midpoint uncertainty approximately ±${(best/2).toFixed(2)} ms`;
+  if(nextOffset!==null)offset=nextOffset;
+  label.textContent=nextOffset===null?(offset===null?'Clock unavailable; motion test still running':'Clock resync unavailable; retaining last estimate'):`Clock sync RTT ${best.toFixed(2)} ms; midpoint uncertainty approximately ±${(best/2).toFixed(2)} ms; refresh every 30 s`;
+  syncing=false;
 }
 sync();
+setInterval(sync,30000);
 const cx=document.querySelector('#stamp').getContext('2d');
 function stamp(t){if(offset===null){cx.clearRect(0,0,340,24);return;}const v=Math.round(t+offset)>>>0;for(let i=0;i<34;i++){cx.fillStyle=i===0?'#00ff00':i===33?'#ff00ff':((v>>>(32-i))&1)?'#ffffff':'#000000';cx.fillRect(i*10,0,10,24);}}
 let wake=null;
