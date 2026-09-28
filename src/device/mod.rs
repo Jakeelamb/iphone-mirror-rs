@@ -155,7 +155,7 @@ impl DeviceSession {
         let port = handshake
             .services
             .get("com.apple.coredevice.displayservice")
-            .context("display service absent; iOS 27 and mounted developer image required")?
+            .context("display service absent; verify Developer Mode and a mounted developer image")?
             .port;
         let display = timeout(CONNECT_TIMEOUT, async {
             let socket: Box<dyn ReadWrite> = Box::new(adapter.connect(port).await?);
