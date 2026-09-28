@@ -78,6 +78,7 @@ from the application and remain on the computer.
 | F8 (with `--game-profile`) | Enter / leave game mouse capture |
 | Escape in game mode | Release all controls and restore the pointer |
 | F9 (with `--game-profile`) | Calibrate touchscreen targets |
+| F10 (with `--game-profile`) | Map one key: press the key, then click its target |
 
 Focus the window before using input. Leaving the window ends a drag; losing
 focus releases held input. The Home button activates on release inside it.

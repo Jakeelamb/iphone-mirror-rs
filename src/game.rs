@@ -23,8 +23,11 @@ pub enum Action {
     Fire,
     Aim,
     Sprint,
+    Vault,
+    Rappel,
+    SecondaryGadget,
 }
-const BUTTONS: [Action; 11] = [
+const BUTTONS: [Action; 14] = [
     Action::LeanLeft,
     Action::LeanRight,
     Action::Reload,
@@ -36,15 +39,20 @@ const BUTTONS: [Action; 11] = [
     Action::Crouch,
     Action::Fire,
     Action::Aim,
+    Action::Vault,
+    Action::Rappel,
+    Action::SecondaryGadget,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Target {
     Joystick,
     Look,
+    Sprint,
     Button(Action),
 }
-pub const CALIBRATION_TARGETS: [Target; 13] = [
+pub const REQUIRED_TARGET_COUNT: usize = 13;
+pub const CALIBRATION_TARGETS: [Target; 17] = [
     Target::Joystick,
     Target::Look,
     Target::Button(Action::LeanLeft),
@@ -58,8 +66,12 @@ pub const CALIBRATION_TARGETS: [Target; 13] = [
     Target::Button(Action::Crouch),
     Target::Button(Action::Fire),
     Target::Button(Action::Aim),
+    Target::Button(Action::Vault),
+    Target::Button(Action::Rappel),
+    Target::Button(Action::SecondaryGadget),
+    Target::Sprint,
 ];
-const NAMES: [&str; 13] = [
+const NAMES: [&str; 17] = [
     "joystick",
     "look",
     "lean_left",
@@ -73,12 +85,17 @@ const NAMES: [&str; 13] = [
     "crouch",
     "fire",
     "aim",
+    "vault",
+    "rappel",
+    "secondary_gadget",
+    "sprint",
 ];
 impl Target {
     fn index(self) -> Option<usize> {
         match self {
             Self::Joystick => Some(0),
             Self::Look => Some(1),
+            Self::Sprint => Some(16),
             Self::Button(action) => BUTTONS.iter().position(|&a| a == action).map(|i| i + 2),
         }
     }
@@ -102,6 +119,7 @@ impl Point {
 #[derive(Debug)]
 pub enum GameError {
     InvalidProfile(&'static str),
+    Uncalibrated(Target),
     Capacity,
     Io(std::io::Error),
 }
@@ -109,6 +127,11 @@ impl fmt::Display for GameError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidProfile(reason) => write!(f, "invalid game profile: {reason}"),
+            Self::Uncalibrated(target) => write!(
+                f,
+                "{} is not calibrated; press F10, its key, then click its HUD target",
+                target.name()
+            ),
             Self::Capacity => {
                 f.write_str("three action contacts are already held; release one first")
             }
@@ -124,7 +147,7 @@ impl From<std::io::Error> for GameError {
 }
 #[derive(Clone, Debug)]
 pub struct Profile {
-    points: [Option<Point>; 13],
+    points: [Option<Point>; 17],
     /// Fraction of the displayed short edge per raw relative mouse unit.
     pub sensitivity: f64,
     /// Joystick displacement as a fraction of the displayed short edge.
@@ -135,7 +158,7 @@ pub struct Profile {
 impl Default for Profile {
     fn default() -> Self {
         Self {
-            points: [None; 13],
+            points: [None; 17],
             sensitivity: 0.002,
             joystick_radius: 0.08,
             sprint_multiplier: 2.0,
@@ -159,7 +182,9 @@ impl Profile {
         Ok(())
     }
     pub fn calibrated(&self) -> bool {
-        self.points.iter().all(Option::is_some)
+        self.points[..REQUIRED_TARGET_COUNT]
+            .iter()
+            .all(Option::is_some)
     }
     fn validate(&self) -> Result<(), GameError> {
         if !self.sensitivity.is_finite() || !(0.000001..=0.1).contains(&self.sensitivity) {
@@ -169,6 +194,14 @@ impl Profile {
         }
         if self.points.iter().flatten().any(|p| !p.valid()) {
             return Err(GameError::InvalidProfile("invalid coordinates"));
+        }
+        if let (Some(center), Some(sprint)) =
+            (self.point(Target::Joystick), self.point(Target::Sprint))
+            && sprint.y >= center.y
+        {
+            return Err(GameError::InvalidProfile(
+                "sprint endpoint must be above the joystick center",
+            ));
         }
         if !self.joystick_radius.is_finite() || !(0.001..=0.5).contains(&self.joystick_radius) {
             return Err(GameError::InvalidProfile(
@@ -327,7 +360,7 @@ struct Contact {
 pub struct GameState {
     profile: Profile,
     contacts: [Option<Contact>; 5],
-    held: [bool; 16],
+    held: [bool; 19],
     look: Option<Point>,
     aspect: f64,
     rotation: u16,
@@ -342,7 +375,7 @@ impl GameState {
         Ok(Self {
             profile,
             contacts: [None; 5],
-            held: [false; 16],
+            held: [false; 19],
             look: None,
             aspect: 1.0,
             rotation: 0,
@@ -447,7 +480,10 @@ impl GameState {
             let norm = f64::from(dx * dx + dy * dy).sqrt().max(1.0);
             let (sx, sy) = self.scale();
             let radius = if self.held[Action::Sprint as usize] && dy < 0 {
-                (self.profile.joystick_radius * self.profile.sprint_multiplier).min(0.5)
+                self.profile.point(Target::Sprint).map_or_else(
+                    || (self.profile.joystick_radius * self.profile.sprint_multiplier).min(0.5),
+                    |endpoint| (center.y - endpoint.y) / sy,
+                )
             } else {
                 self.profile.joystick_radius
             };
@@ -458,13 +494,17 @@ impl GameState {
             self.contacts[0] = Some(self.contact(p, None));
             batch.push(self.report(TouchPhase::Move, 0, timestamp));
         } else if pressed {
+            let target = Target::Button(action);
+            let Some(point) = self.profile.point(target) else {
+                batch.error = Some(GameError::Uncalibrated(target));
+                return batch;
+            };
             let Some(id) = (2..5).find(|&id| self.contacts[id].is_none()) else {
                 batch.error = Some(GameError::Capacity);
                 return batch;
             };
             self.held[action as usize] = true;
-            self.contacts[id] =
-                Some(self.contact(self.point(Target::Button(action)), Some(action)));
+            self.contacts[id] = Some(self.contact(point, Some(action)));
             batch.push(self.report(TouchPhase::Begin, 0, timestamp));
         } else {
             self.held[action as usize] = false;
@@ -583,7 +623,10 @@ mod tests {
     use super::*;
     fn profile() -> Profile {
         let mut p = Profile::default();
-        for target in CALIBRATION_TARGETS {
+        for target in CALIBRATION_TARGETS
+            .into_iter()
+            .filter(|&target| target != Target::Sprint)
+        {
             p.set_point(target, Point { x: 0.5, y: 0.5 }).unwrap();
         }
         p
@@ -908,6 +951,73 @@ mod tests {
                 assert!(reports(s.key(Action::Sprint, true, rotation, 3)).is_empty());
             }
         }
+    }
+
+    #[test]
+    fn calibrated_sprint_endpoint_overrides_multiplier_in_each_aspect_and_rotation() {
+        for aspect in [0.5, 1.0, 2.0] {
+            for rotation in [0, 90, 180, 270] {
+                let mut p = profile();
+                p.set_point(Target::Sprint, Point { x: 0.5, y: 0.15 })
+                    .unwrap();
+                let mut s = GameState::new(p).unwrap();
+                s.set_aspect(aspect).unwrap();
+                reports(s.key(Action::Up, true, rotation, 0));
+                let sprint = reports(s.key(Action::Sprint, true, rotation, 1));
+                let (x, y) = normalized_position(0.5, 0.15, rotation).unwrap();
+                assert_eq!(contact(&sprint[0].1, 0), Some((true, x, y)));
+                let walking = reports(s.key(Action::Sprint, false, rotation, 2));
+                assert_ne!(contact(&walking[0].1, 0), Some((true, x, y)));
+            }
+        }
+        let mut p = profile();
+        p.set_point(Target::Sprint, Point { x: 0.5, y: 0.6 })
+            .unwrap();
+        assert!(GameState::new(p).is_err());
+    }
+
+    #[test]
+    fn old_profiles_work_and_unmapped_extra_actions_never_guess_a_touch() {
+        let mut p = Profile::default();
+        for target in &CALIBRATION_TARGETS[..REQUIRED_TARGET_COUNT] {
+            p.set_point(*target, Point { x: 0.5, y: 0.5 }).unwrap();
+        }
+        assert!(p.calibrated());
+        let mut s = GameState::new(p).unwrap();
+        for action in [Action::Vault, Action::Rappel, Action::SecondaryGadget] {
+            let batch = s.key(action, true, 0, 0);
+            assert!(matches!(batch.error, Some(GameError::Uncalibrated(_))));
+            assert!(batch.events.iter().all(Option::is_none));
+            assert!(reports(s.key(action, false, 0, 1)).is_empty());
+        }
+    }
+
+    #[test]
+    fn extra_buttons_hold_distinct_targets_and_release_without_disturbing_movement() {
+        let mut p = profile();
+        let actions = [Action::Vault, Action::Rappel, Action::SecondaryGadget];
+        for (i, action) in actions.iter().enumerate() {
+            p.set_point(
+                Target::Button(*action),
+                Point {
+                    x: 0.2 + i as f64 * 0.2,
+                    y: 0.7,
+                },
+            )
+            .unwrap();
+        }
+        let mut s = GameState::new(p).unwrap();
+        reports(s.key(Action::Up, true, 0, 0));
+        reports(s.motion(1.0, 0.0, 0, 1));
+        for (i, action) in actions.iter().enumerate() {
+            let down = reports(s.key(*action, true, 0, 2));
+            let (x, y) = normalized_position(0.2 + i as f64 * 0.2, 0.7, 0).unwrap();
+            assert_eq!(contact(&down[0].1, i as u8 + 2), Some((true, x, y)));
+        }
+        let released = reports(s.key(Action::SecondaryGadget, false, 0, 3));
+        assert!(contact(&released[0].1, 0).unwrap().0);
+        assert!(contact(&released[0].1, 1).unwrap().0);
+        assert!(!contact(&released[0].1, 4).unwrap().0);
     }
 
     #[test]
@@ -1271,6 +1381,9 @@ mod tests {
             Action::Fire,
             Action::Aim,
             Action::Sprint,
+            Action::Vault,
+            Action::Rappel,
+            Action::SecondaryGadget,
         ];
         let mut state = state();
         let mut remote: [Option<(u16, u16)>; 5] = [None; 5];

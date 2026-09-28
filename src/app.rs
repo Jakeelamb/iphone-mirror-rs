@@ -510,6 +510,16 @@ impl App {
                 }
                 true
             }
+            KeyCode::F10 => {
+                if pressed {
+                    self.release();
+                    if let Some(game) = &mut self.game {
+                        game.start_target_calibration();
+                    }
+                    self.update_title();
+                }
+                true
+            }
             KeyCode::Escape
                 if self.game_active()
                     || self.game.as_ref().is_some_and(|g| g.calibration.is_some()) =>
@@ -526,6 +536,15 @@ impl App {
             KeyCode::F1 | KeyCode::F2 if self.game_active() => {
                 self.exit_game();
                 false
+            }
+            _ if self.game.as_ref().is_some_and(|g| g.calibration.is_some()) => {
+                if pressed {
+                    if let Some(game) = &mut self.game {
+                        game.select_calibration_key(code);
+                    }
+                    self.update_title();
+                }
+                true
             }
             _ if self.game_active() => {
                 if matches!(code, KeyCode::ShiftLeft | KeyCode::ShiftRight) {
@@ -933,7 +952,10 @@ mod tests {
         use iphone_mirror_rs::game::{CALIBRATION_TARGETS, Point, Profile};
         let mut app = app();
         let mut profile = Profile::default();
-        for target in CALIBRATION_TARGETS {
+        for target in CALIBRATION_TARGETS
+            .into_iter()
+            .filter(|&target| target != iphone_mirror_rs::game::Target::Sprint)
+        {
             profile.set_point(target, Point { x: 0.5, y: 0.5 }).unwrap();
         }
         let state = GameState::new(profile.clone()).unwrap();
@@ -1023,6 +1045,31 @@ mod tests {
             }]
         ));
         assert!(app.game_active());
+    }
+
+    #[test]
+    fn targeted_calibration_exits_capture_and_consumes_binding_keys_locally() {
+        let mut app = with_game();
+        app.key(KeyCode::KeyW, true);
+        events(&app);
+        app.key(KeyCode::F10, true);
+        assert!(!app.game_active());
+        assert!(matches!(
+            events(&app).as_slice(),
+            [HidEvent::ReleaseTouches { .. }]
+        ));
+        app.key(KeyCode::KeyB, true);
+        app.key(KeyCode::KeyB, false);
+        assert!(events(&app).is_empty());
+        assert!(matches!(
+            app.game.as_ref().and_then(|g| g.calibration.as_ref()),
+            Some(crate::game_ui::Calibration::Single(
+                iphone_mirror_rs::game::Target::Button(Action::SecondaryGadget)
+            ))
+        ));
+        app.key(KeyCode::Escape, true);
+        assert!(app.game.as_ref().is_some_and(|g| g.calibration.is_none()));
+        assert!(events(&app).is_empty());
     }
     #[test]
     fn home_exits_game_before_dispatching_phone_button() {

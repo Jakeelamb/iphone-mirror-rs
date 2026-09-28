@@ -21,6 +21,22 @@ These calibration clicks stay in the viewer; they do not tap the phone.
 Escape cancels. The final click saves the profile atomically. F9 repeats the
 calibration; different layouts can use different profile files.
 
+To map one key without repeating setup, press **F10**, press the desired key,
+then click its on-screen control. Use **Space** for vault/climb, **X** for rappel,
+and **B** for a second throwable or gadget. Existing profiles can still enter
+game mode; these optional actions remain inactive until calibrated. An unmapped
+action logs a calibration warning and sends no guessed touch. F10 calibration
+clicks stay local, save immediately, and preserve every other binding. Escape
+cancels without saving. Contextual actions must be visible at an eligible ledge
+or wall, or exposed in the game's HUD editor.
+
+For sprint, use **F10 → Shift → click the forward sprint endpoint above the
+joystick**. Its vertical distance replaces the default sprint multiplier;
+the joystick center remains unchanged. Choose the point the movement finger
+must reach, rather than a separate action button. Test in the training area
+with ADS/crouch off. This calibration changes the drag endpoint, not the game's
+rules, and does not intentionally release on the sprint-lock icon.
+
 Coordinates are relative to the displayed phone image, excluding margins and
 the Home strip. Resize the window freely. Recalibrate after moving game HUD
 buttons. Rotation or a change of video dimensions exits game mode; re-enter
@@ -63,6 +79,9 @@ to the phone, so pending look recenters do not replay after Escape.
 | F | Interact |
 | V | Melee |
 | G | Grenade |
+| B | Second throwable / gadget (requires its own calibration) |
+| Space | Vault / climb (contextual; requires calibration) |
+| X | Rappel (contextual; requires calibration) |
 | 1 / 2 | Primary / secondary weapon |
 | C | Crouch |
 | Left / right mouse button | Fire / aim down sights |
@@ -102,6 +121,12 @@ sprint threshold; this is a held joystick gesture, not a separate sprint-button
 tap or an intentional sprint-lock release. Ubisoft describes sprint-lock as
 [dragging past the joystick circle and releasing on the sprint icon](https://ubisoft-mobile.helpshift.com/hc/en/45-rainbow-six-mobile/faq/2266-how-do-i-automatically-run-sprint-lock/?p=web).
 Restart the viewer after editing the file.
+The optional `sprint=x,y` endpoint takes priority over `sprint_multiplier`;
+its y coordinate must be above `joystick`, and its x coordinate is not used
+to steer. Optional `vault`, `rappel`, and `secondary_gadget` fields use ordinary
+target coordinates. A key targets a HUD slot, not a named item: B may activate
+a different gadget on another operator. Separate profile files are appropriate
+when the layout changes. F10 saves and applies a mapping without a restart.
 
 The protocol supports **five contacts**. Movement and looking each reserve one;
 three action buttons can be held together. Additional action presses are
@@ -146,7 +171,9 @@ not a measurement of end-to-end input latency or a guarantee of PC-like aiming.
 
 Shift sprint has offline coverage for both Shift keys, release/exit cleanup,
 diagonals, rotations and preservation of simultaneous contacts. Its default
-radius and hold/release behavior have not yet been live-qualified in the game.
+radius did not reliably activate sprint in the user's live match. The explicit
+endpoint calibration and new vault/rappel/second-gadget bindings have offline
+coverage but still require live HUD calibration and gameplay verification.
 Idle contact expiration passes timer and quick-handoff regression tests, but
 the reported death/respawn issue still needs a live retest with this change.
 
