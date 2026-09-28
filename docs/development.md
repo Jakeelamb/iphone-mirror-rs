@@ -18,6 +18,8 @@ source because `idevice`'s native CoreDevice APIs are pinned to a Git revision.
 | `src/video/orientation.rs` | Interface orientation to GPU rotation and displayed dimensions |
 | `src/video/layout.rs` | Shared DPI-aware screen/button geometry and pointer hit testing |
 | `src/input.rs` | HID encoding, contact/key state and bounded input queue |
+| `src/game.rs` | Calibrated five-contact mapping, full touch snapshots and profile persistence |
+| `src/game_ui.rs` | Calibration steps and physical game-key bindings |
 | `src/app.rs` | winit window events, coordinate mapping and controls |
 | `src/metrics.rs` | Fixed-size counters, timing histograms and optional synthetic timestamp recognition |
 
@@ -46,6 +48,12 @@ check rounded corners, touch mapping and
 DPI scaling. Orientation tests cover both landscape directions, already-rotated
 buffers, touch release at rotation and footer-aware window fitting. These tests
 do not require a connected iPhone.
+
+Game-control tests compare active/released frames with the pinned upstream
+multitouch encoder, preserve held contacts through look recentering, bound
+button capacity and check cleanup at Escape, focus loss and rotation. These
+are protocol/state tests; use the [touch diagnostic](game-controls.md#diagnostic-page)
+and a game's training HUD to qualify actual device delivery and control semantics.
 
 Probe local decoder hardware explicitly:
 

@@ -75,6 +75,9 @@ from the application and remain on the computer.
 | Keyboard | ASCII text, modifiers and navigation keys |
 | House button below the picture, or F1 | Home |
 | F2 | Spotlight |
+| F8 (with `--game-profile`) | Enter / leave game mouse capture |
+| Escape in game mode | Release all controls and restore the pointer |
+| F9 (with `--game-profile`) | Calibrate touchscreen targets |
 
 Focus the window before using input. Leaving the window ends a drag; losing
 focus releases held input. The Home button activates on release inside it.
@@ -86,8 +89,11 @@ swipes use the same transformation. The Home strip stays upright. The window
 requests a matching size, but tiling or maximization can override it and leave
 letterboxing. Resize or float the window in your desktop if needed.
 
-Not implemented: audio, clipboard injection, Unicode/IME composition, custom
-game keymaps or simultaneous touch contacts. There is no automatic reconnection
+Optional [game controls](docs/game-controls.md) map WASD, action keys and relative
+mouse motion to up to five independent touchscreen contacts. They require a
+calibrated HUD profile and a compositor that supports pointer locking.
+
+Not implemented: audio, clipboard injection or Unicode/IME composition. There is no automatic reconnection
 after a failed session.
 
 ## Options
