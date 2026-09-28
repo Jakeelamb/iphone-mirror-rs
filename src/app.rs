@@ -6,7 +6,9 @@ use iphone_mirror_rs::input::{
     HidEvent, InputState, TouchPhase, TouchSample, ascii_usage, normalized_position, wheel_gesture,
 };
 use iphone_mirror_rs::metrics::Metrics;
-use iphone_mirror_rs::video::{DecodedFrame, LatestFrame, Renderer, ViewerLayout};
+use iphone_mirror_rs::video::{
+    DecodedFrame, LatestFrame, Renderer, ViewerLayout, displayed_size, visual_rotation,
+};
 use tokio::sync::watch;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
@@ -21,6 +23,7 @@ use crate::session::InputBus;
 pub enum AppEvent {
     Connected,
     FrameReady,
+    OrientationChanged(u32),
     Finished(bool),
 }
 
@@ -44,6 +47,9 @@ pub struct App {
     pending_scroll: f64,
     clock: Instant,
     connected: bool,
+    orientation: u8,
+    rotation: u16,
+    display_size: Option<(u32, u32)>,
     focused: bool,
     pub failed: bool,
 }
@@ -75,6 +81,9 @@ impl App {
             pending_scroll: 0.0,
             clock: Instant::now(),
             connected: false,
+            orientation: 1,
+            rotation: 0,
+            display_size: None,
             focused: false,
             failed: false,
         }
@@ -111,13 +120,56 @@ impl App {
         let window = self.window.as_ref()?;
         let frame = self.frame.as_ref()?;
         let size = window.inner_size();
+        let (width, height) = displayed_size(frame.width, frame.height, self.rotation);
         Some(ViewerLayout::new(
             size.width,
             size.height,
-            frame.width,
-            frame.height,
+            width,
+            height,
             window.scale_factor(),
         ))
+    }
+
+    fn set_rotation(&mut self, rotation: u16) {
+        if self.rotation != rotation {
+            // End contacts in the old coordinate space before changing mapping.
+            self.cancel_touch();
+            self.home_armed = false;
+            self.rotation = rotation;
+            if let Some(renderer) = &mut self.renderer {
+                renderer.set_rotation(rotation);
+            }
+        }
+    }
+
+    fn apply_view(&mut self) {
+        let Some(frame) = &self.frame else {
+            return;
+        };
+        let rotation = visual_rotation(self.orientation, frame.width, frame.height);
+        let dimensions = displayed_size(frame.width, frame.height, rotation);
+        self.set_rotation(rotation);
+        if self.display_size != Some(dimensions) {
+            self.cancel_touch();
+            self.home_armed = false;
+            self.display_size = Some(dimensions);
+            if let Some(window) = &self.window {
+                let dpi = window.scale_factor();
+                let size = window.inner_size().to_logical::<f64>(dpi);
+                let limit = window.current_monitor().map(|monitor| {
+                    let size = monitor.size().to_logical::<f64>(dpi);
+                    (size.width * 0.9, size.height * 0.9)
+                });
+                let (width, height) =
+                    fitted_window_size((size.width, size.height), dimensions, limit);
+                // Wayland tiling/maximization policy may override this request.
+                let _ = window.request_inner_size(LogicalSize::new(width, height));
+            }
+        }
+        self.update_home_visual();
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
     }
 
     fn position(&self, clamp: bool) -> Option<(f64, f64)> {
@@ -157,7 +209,7 @@ impl App {
             return;
         }
         if let Some((x, y)) = self.position(false)
-            && let Some(samples) = wheel_gesture(x, y, self.pending_scroll, 0)
+            && let Some(samples) = wheel_gesture(x, y, self.pending_scroll, self.rotation)
         {
             self.wheel = Some((samples, 0, Instant::now()));
         }
@@ -332,6 +384,12 @@ impl ApplicationHandler<AppEvent> for App {
                     window.request_redraw();
                 }
             }
+            AppEvent::OrientationChanged(orientation) => {
+                if (1..=4).contains(&orientation) && u32::from(self.orientation) != orientation {
+                    self.orientation = orientation as u8;
+                    self.apply_view();
+                }
+            }
             AppEvent::Finished(failed) => {
                 self.failed |= failed;
                 self.release();
@@ -380,8 +438,7 @@ impl ApplicationHandler<AppEvent> for App {
                     });
                     self.frame = Some(fresh);
                     if geometry_changed {
-                        self.home_armed = false;
-                        self.update_home_visual();
+                        self.apply_view();
                     }
                 }
                 if let (Some(renderer), Some(frame)) = (&mut self.renderer, &self.frame) {
@@ -411,7 +468,7 @@ impl ApplicationHandler<AppEvent> for App {
                     && self.wheel.is_none()
                     && let Some((x, y)) = self
                         .position(true)
-                        .and_then(|(x, y)| normalized_position(x, y, 0))
+                        .and_then(|(x, y)| normalized_position(x, y, self.rotation))
                 {
                     let event = self.controls.touch_move(x, y, self.timestamp());
                     self.send(event);
@@ -430,7 +487,7 @@ impl ApplicationHandler<AppEvent> for App {
             } if self.focused && self.connected => {
                 let position = self
                     .position(false)
-                    .and_then(|(x, y)| normalized_position(x, y, 0));
+                    .and_then(|(x, y)| normalized_position(x, y, self.rotation));
                 self.pointer_button(state == ElementState::Pressed, self.home_hit(), position);
                 self.update_home_visual();
             }
@@ -469,6 +526,28 @@ impl ApplicationHandler<AppEvent> for App {
                 .map_or(ControlFlow::Wait, |(_, _, at)| ControlFlow::WaitUntil(*at)),
         );
     }
+}
+
+/// Preserve the displayed short edge across rotation and reserve the footer.
+/// Monitor limits keep a portrait-to-landscape flip on screen when possible.
+fn fitted_window_size(
+    current: (f64, f64),
+    display: (u32, u32),
+    limit: Option<(f64, f64)>,
+) -> (f64, f64) {
+    let footer = 48.0;
+    let short = current.0.min((current.1 - footer).max(1.0)).max(180.0);
+    let aspect_scale = short / f64::from(display.0.min(display.1).max(1));
+    let mut width = f64::from(display.0) * aspect_scale;
+    let mut height = f64::from(display.1) * aspect_scale;
+    if let Some((max_width, max_height)) = limit {
+        let scale = (max_width / width)
+            .min((max_height - footer).max(1.0) / height)
+            .min(1.0);
+        width *= scale;
+        height *= scale;
+    }
+    (width.max(1.0), height + footer)
 }
 
 fn hid_usage(code: KeyCode) -> Option<u8> {
@@ -562,6 +641,40 @@ mod tests {
         app.advance_scroll(now);
         now
     }
+    #[test]
+    fn rotation_releases_contacts_and_cancels_old_scroll_coordinates() {
+        let mut app = app();
+        begin_wheel(&mut app);
+        events(&app);
+        app.home_armed = true;
+        app.set_rotation(270);
+        assert_eq!(app.rotation, 270);
+        assert!(!app.home_armed);
+        assert!(app.wheel.is_none());
+        assert!(matches!(
+            events(&app).as_slice(),
+            [HidEvent::Touch {
+                phase: TouchPhase::End,
+                ..
+            }]
+        ));
+        app.set_rotation(270);
+        assert!(events(&app).is_empty());
+    }
+
+    #[test]
+    fn fitting_rotates_video_dimensions_without_rotating_footer() {
+        let landscape = fitted_window_size((400.0, 918.0), (2576, 1184), None);
+        assert!((landscape.0 - 870.270270).abs() < 0.001);
+        assert_eq!(landscape.1, 448.0);
+        let portrait = fitted_window_size(landscape, (1184, 2576), None);
+        assert_eq!(portrait.0, 400.0);
+        assert!((portrait.1 - 918.270270).abs() < 0.001);
+        let limited = fitted_window_size((1000.0, 1400.0), (2576, 1184), Some((900.0, 700.0)));
+        assert!(limited.0 <= 900.0 && limited.1 <= 700.0);
+        assert!((limited.0 / (limited.1 - 48.0) - 2576.0 / 1184.0).abs() < 1e-10);
+    }
+
     #[test]
     fn home_button_click_sends_a_complete_home_tap_without_touch() {
         let mut app = app();

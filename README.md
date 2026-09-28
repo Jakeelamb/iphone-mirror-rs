@@ -74,8 +74,18 @@ Leaving the window ends a drag; losing focus releases held input. ASCII typing
 follows the host logical character, including shifted punctuation, while
 modifier and key-release state remains tied to physical keys. Unicode/IME
 composition, custom game keymaps, simultaneous touch contacts, clipboard text
-injection and audio are not implemented. Live input verification currently covers portrait orientation;
-automatic orientation tracking is not implemented.
+injection and audio are not implemented.
+
+The viewer follows the phone's interface orientation, including both landscape
+directions. Video rotation happens in the GPU shader; taps, drags and wheel
+swipes use the same transformation. A rotation ends any active touch first.
+Already-landscape video buffers are not rotated a second time. Orientation is
+polled about every 400 ms independently of video; temporary service failures
+retain the last orientation and retry without stopping the stream.
+
+On the first frame and when the displayed dimensions change, the window requests
+a size fitted to the phone plus the Home strip. Tiling or maximization may let
+the desktop compositor override that request; remaining space is letterboxed.
 
 ## Architecture and development
 
