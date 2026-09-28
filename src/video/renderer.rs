@@ -6,6 +6,10 @@ use std::sync::Arc;
 use std::time::Instant;
 use winit::window::Window;
 
+#[path = "status.rs"]
+mod status;
+use status::StatusText;
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Parameters {
@@ -38,6 +42,8 @@ pub struct Renderer {
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     uniform: wgpu::Buffer,
+    status_uniform: wgpu::Buffer,
+    status: StatusText,
     textures: Option<Textures>,
     home_hovered: bool,
     home_pressed: bool,
@@ -124,6 +130,16 @@ impl Renderer {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -138,6 +154,14 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let status = StatusText::default();
+        let status_uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("control status bitmap"),
+            size: StatusText::BYTE_SIZE,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&status_uniform, 0, status.bytes());
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("YUV conversion"),
             source: wgpu::ShaderSource::Wgsl(include_str!("yuv.wgsl").into()),
@@ -186,6 +210,8 @@ impl Renderer {
             layout,
             sampler,
             uniform,
+            status_uniform,
+            status,
             textures: None,
             home_hovered: false,
             home_pressed: false,
@@ -208,6 +234,18 @@ impl Renderer {
         let changed = self.rotation != rotation;
         self.rotation = rotation;
         changed
+    }
+
+    /// Show a transient ASCII status above the Home toolbar. Empty text hides it.
+    /// Text is uppercased, bounded to 80 glyphs, and clipped at the window edge.
+    /// Returns true when the window should redraw; uploads occur only on changes.
+    pub fn set_status(&mut self, text: &str) -> bool {
+        if !self.status.set(text) {
+            return false;
+        }
+        self.queue
+            .write_buffer(&self.status_uniform, 0, self.status.bytes());
+        true
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -424,6 +462,10 @@ impl Renderer {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: self.uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: self.status_uniform.as_entire_binding(),
                 },
             ],
         });

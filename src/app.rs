@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
+use iphone_mirror_rs::game::{Action, EventBatch, GameState};
 use iphone_mirror_rs::input::{
     HidEvent, InputState, TouchPhase, TouchSample, ascii_usage, normalized_position, wheel_gesture,
 };
@@ -12,10 +13,12 @@ use iphone_mirror_rs::video::{
 use tokio::sync::watch;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
-use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{
+    DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent,
+};
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::keyboard::{Key, KeyCode, PhysicalKey};
-use winit::window::{CursorIcon, Window, WindowId};
+use winit::window::{CursorGrabMode, CursorIcon, Window, WindowId};
 
 use crate::session::InputBus;
 
@@ -51,6 +54,7 @@ pub struct App {
     rotation: u16,
     display_size: Option<(u32, u32)>,
     focused: bool,
+    pub game: Option<crate::game_ui::GameControls>,
     pub failed: bool,
 }
 
@@ -85,6 +89,7 @@ impl App {
             rotation: 0,
             display_size: None,
             focused: false,
+            game: None,
             failed: false,
         }
     }
@@ -103,6 +108,7 @@ impl App {
     }
 
     fn release(&mut self) {
+        self.exit_game();
         self.wheel = None;
         self.pending_scroll = 0.0;
         self.mouse_down = false;
@@ -132,6 +138,11 @@ impl App {
 
     fn set_rotation(&mut self, rotation: u16) {
         if self.rotation != rotation {
+            self.exit_game();
+            if let Some(game) = &mut self.game {
+                game.calibration = None;
+            }
+            self.update_title();
             // End contacts in the old coordinate space before changing mapping.
             self.cancel_touch();
             self.home_armed = false;
@@ -150,6 +161,7 @@ impl App {
         let dimensions = displayed_size(frame.width, frame.height, rotation);
         self.set_rotation(rotation);
         if self.display_size != Some(dimensions) {
+            self.exit_game();
             self.cancel_touch();
             self.home_armed = false;
             self.display_size = Some(dimensions);
@@ -234,6 +246,9 @@ impl App {
     }
 
     fn key_event(&mut self, code: KeyCode, pressed: bool, character: Option<char>) {
+        if self.game_key(code, pressed) {
+            return;
+        }
         let timestamp = self.timestamp();
         if code == KeyCode::F1 {
             self.keyboard_home = pressed;
@@ -337,6 +352,138 @@ impl App {
             }
         }
     }
+
+    fn game_active(&self) -> bool {
+        self.game.as_ref().is_some_and(|game| game.state.is_some())
+    }
+
+    fn update_title(&mut self) {
+        let title = self.game.as_ref().map(|game| game.title());
+        if let Some(window) = &self.window {
+            if let Some(title) = &title {
+                window.set_title(title);
+            } else {
+                window.set_title("iPhone Mirror");
+            }
+        }
+        if let Some(renderer) = &mut self.renderer
+            && renderer.set_status(title.as_deref().unwrap_or(""))
+            && let Some(window) = &self.window
+        {
+            window.request_redraw();
+        }
+    }
+
+    fn send_game(&mut self, batch: EventBatch) {
+        if let Some(error) = &batch.error {
+            tracing::warn!(%error, "game input rejected");
+        }
+        for event in batch {
+            self.send(event);
+        }
+    }
+
+    fn exit_game(&mut self) {
+        let timestamp = self.timestamp();
+        if let Some(mut state) = self.game.as_mut().and_then(|game| game.state.take()) {
+            self.send_game(state.release_all(timestamp));
+            if let Some(window) = &self.window {
+                let _ = window.set_cursor_grab(CursorGrabMode::None);
+                window.set_cursor_visible(true);
+            }
+            self.update_title();
+        }
+    }
+
+    fn enter_game(&mut self) {
+        self.release();
+        let Some(game) = &mut self.game else { return };
+        if game.calibration.is_some() {
+            return;
+        }
+        let result = (|| -> anyhow::Result<GameState> {
+            let mut state = GameState::new(game.profile.clone())?;
+            let (width, height) = self
+                .display_size
+                .ok_or_else(|| anyhow::anyhow!("waiting for phone video"))?;
+            state.set_aspect(f64::from(width) / f64::from(height))?;
+            let window = self
+                .window
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("waiting for window"))?;
+            // Confined cursors hit a screen edge; aiming requires a true lock.
+            window.set_cursor_grab(CursorGrabMode::Locked)?;
+            window.set_cursor_visible(false);
+            Ok(state)
+        })();
+        match result {
+            Ok(state) => game.state = Some(state),
+            Err(error) => {
+                tracing::warn!(%error, "cannot enter game mode; calibrate with F9 and use a compositor with pointer lock")
+            }
+        }
+        self.update_title();
+    }
+
+    fn game_key(&mut self, code: KeyCode, pressed: bool) -> bool {
+        if self.game.is_none() {
+            return false;
+        }
+        match code {
+            KeyCode::F8 => {
+                if pressed {
+                    if self.game_active() {
+                        self.exit_game();
+                    } else {
+                        self.enter_game();
+                    }
+                }
+                true
+            }
+            KeyCode::F9 => {
+                if pressed {
+                    self.release();
+                    if let Some(game) = &mut self.game {
+                        game.start_calibration();
+                    }
+                    self.update_title();
+                }
+                true
+            }
+            KeyCode::Escape
+                if self.game_active()
+                    || self.game.as_ref().is_some_and(|g| g.calibration.is_some()) =>
+            {
+                if pressed {
+                    self.exit_game();
+                    if let Some(game) = &mut self.game {
+                        game.calibration = None;
+                    }
+                    self.update_title();
+                }
+                true
+            }
+            KeyCode::F1 | KeyCode::F2 if self.game_active() => {
+                self.exit_game();
+                false
+            }
+            _ if self.game_active() => {
+                if let Some(action) = crate::game_ui::action(code) {
+                    self.game_action(action, pressed);
+                }
+                true
+            }
+            _ => self.game.as_ref().is_some_and(|g| g.calibration.is_some()),
+        }
+    }
+
+    fn game_action(&mut self, action: Action, pressed: bool) {
+        let timestamp = self.timestamp();
+        if let Some(state) = self.game.as_mut().and_then(|game| game.state.as_mut()) {
+            let batch = state.key(action, pressed, self.rotation, timestamp);
+            self.send_game(batch);
+        }
+    }
 }
 
 impl ApplicationHandler<AppEvent> for App {
@@ -375,9 +522,7 @@ impl ApplicationHandler<AppEvent> for App {
             AppEvent::Connected => {
                 self.connected = true;
                 self.update_home_visual();
-                if let Some(window) = &self.window {
-                    window.set_title("iPhone Mirror");
-                }
+                self.update_title();
             }
             AppEvent::FrameReady => {
                 if let Some(window) = &self.window {
@@ -461,6 +606,9 @@ impl ApplicationHandler<AppEvent> for App {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
+                if self.game_active() {
+                    return;
+                }
                 self.pointer = position;
                 self.update_home_visual();
                 if self.focused
@@ -475,16 +623,39 @@ impl ApplicationHandler<AppEvent> for App {
                 }
             }
             WindowEvent::CursorLeft { .. } => {
+                if self.game_active() {
+                    return;
+                }
                 self.cancel_touch();
                 self.home_armed = false;
                 self.pointer = PhysicalPosition::new(-1.0, -1.0);
                 self.update_home_visual();
             }
-            WindowEvent::MouseInput {
-                state,
-                button: MouseButton::Left,
-                ..
-            } if self.focused && self.connected => {
+            WindowEvent::MouseInput { state, button, .. } if self.focused && self.connected => {
+                if self.game_active() {
+                    match button {
+                        MouseButton::Left => self.game_action(Action::Fire, state.is_pressed()),
+                        MouseButton::Right => self.game_action(Action::Aim, state.is_pressed()),
+                        _ => {}
+                    }
+                    return;
+                }
+                if button != MouseButton::Left {
+                    return;
+                }
+                if self.game.as_ref().is_some_and(|g| g.calibration.is_some()) {
+                    if state.is_pressed()
+                        && let Some((x, y)) = self.position(false)
+                    {
+                        if let Some(game) = &mut self.game
+                            && let Err(error) = game.calibrate(x, y)
+                        {
+                            tracing::warn!(%error, "calibration failed");
+                        }
+                        self.update_title();
+                    }
+                    return;
+                }
                 let position = self
                     .position(false)
                     .and_then(|(x, y)| normalized_position(x, y, self.rotation));
@@ -492,6 +663,10 @@ impl ApplicationHandler<AppEvent> for App {
                 self.update_home_visual();
             }
             WindowEvent::MouseWheel { delta, .. } if self.focused && self.connected => {
+                if self.game_active() || self.game.as_ref().is_some_and(|g| g.calibration.is_some())
+                {
+                    return;
+                }
                 let lines = match delta {
                     MouseScrollDelta::LineDelta(_, y) => f64::from(y),
                     MouseScrollDelta::PixelDelta(p) => p.y / 50.0,
@@ -515,6 +690,19 @@ impl ApplicationHandler<AppEvent> for App {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn device_event(&mut self, _: &ActiveEventLoop, _: DeviceId, event: DeviceEvent) {
+        if !self.focused || !self.connected {
+            return;
+        }
+        if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event {
+            let timestamp = self.timestamp();
+            if let Some(state) = self.game.as_mut().and_then(|game| game.state.as_mut()) {
+                let batch = state.motion(dx, dy, self.rotation, timestamp);
+                self.send_game(batch);
+            }
         }
     }
 
@@ -640,6 +828,93 @@ mod tests {
         app.wheel = Some((wheel_gesture(0.5, 0.5, -1.0, 0).unwrap(), 0, now));
         app.advance_scroll(now);
         now
+    }
+    fn with_game() -> App {
+        use iphone_mirror_rs::game::{CALIBRATION_TARGETS, Point, Profile};
+        let mut app = app();
+        let mut profile = Profile::default();
+        for target in CALIBRATION_TARGETS {
+            profile.set_point(target, Point { x: 0.5, y: 0.5 }).unwrap();
+        }
+        let state = GameState::new(profile.clone()).unwrap();
+        app.game = Some(crate::game_ui::GameControls {
+            path: "/unused".into(),
+            profile,
+            state: Some(state),
+            calibration: None,
+        });
+        app
+    }
+    #[test]
+    fn game_keys_do_not_type_on_phone_and_escape_releases_every_contact() {
+        let mut app = with_game();
+        app.key(KeyCode::KeyW, true);
+        app.key(KeyCode::KeyC, true);
+        app.game_action(Action::Fire, true);
+        app.key(KeyCode::KeyT, true); // Unbound keys must not leak into chat.
+        let sent = events(&app);
+        assert!(
+            sent.iter()
+                .all(|event| matches!(event, HidEvent::Touch { .. }))
+        );
+        app.key(KeyCode::Escape, true);
+        assert!(!app.game_active());
+        let sent = events(&app);
+        let [
+            HidEvent::Touch {
+                phase: TouchPhase::End,
+                report,
+            },
+        ] = sent.as_slice()
+        else {
+            panic!("release frame")
+        };
+        assert_eq!(report[1], 3);
+        for slot in 0..3 {
+            assert_eq!(report[3 + slot * 5] & 0xc0, 0);
+        }
+        app.release();
+        assert!(events(&app).is_empty());
+    }
+    #[test]
+    fn game_rotation_and_focus_cleanup_disable_capture() {
+        for rotate in [false, true] {
+            let mut app = with_game();
+            app.key(KeyCode::KeyW, true);
+            app.game_action(Action::Aim, true);
+            events(&app);
+            if rotate {
+                app.set_rotation(270);
+            } else {
+                app.release();
+            }
+            assert!(!app.game_active());
+            assert!(matches!(
+                events(&app).as_slice(),
+                [HidEvent::Touch {
+                    phase: TouchPhase::End,
+                    ..
+                }]
+            ));
+        }
+    }
+    #[test]
+    fn home_exits_game_before_dispatching_phone_button() {
+        let mut app = with_game();
+        app.key(KeyCode::KeyW, true);
+        events(&app);
+        app.key(KeyCode::F1, true);
+        assert!(matches!(
+            events(&app).as_slice(),
+            [
+                HidEvent::Touch {
+                    phase: TouchPhase::End,
+                    ..
+                },
+                HidEvent::Home { pressed: true }
+            ]
+        ));
+        assert!(!app.game_active());
     }
     #[test]
     fn rotation_releases_contacts_and_cancels_old_scroll_coordinates() {

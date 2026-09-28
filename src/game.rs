@@ -713,4 +713,132 @@ mod tests {
         let next = reports(s.key(Action::Fire, true, 90, 3));
         assert_eq!(contact(&next[0].1, 2), Some((true, 49151, 49151)));
     }
+
+    #[test]
+    fn mixed_sequences_preserve_remote_contact_lifetimes_and_move_identity_sets() {
+        let actions = [
+            Action::Up,
+            Action::Down,
+            Action::Left,
+            Action::Right,
+            Action::LeanLeft,
+            Action::LeanRight,
+            Action::Reload,
+            Action::Interact,
+            Action::Melee,
+            Action::Grenade,
+            Action::Primary,
+            Action::Secondary,
+            Action::Crouch,
+            Action::Fire,
+            Action::Aim,
+        ];
+        let mut state = state();
+        let mut remote: [Option<(u16, u16)>; 5] = [None; 5];
+        let mut seed = 0xcafef00d12345678u64;
+        for step in 0..4096u64 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let rotation = ((step / 71) % 4 * 90) as u16;
+            let batch = if step % 53 == 0 || step == 4095 {
+                state.release_all(step)
+            } else if step % 5 == 0 {
+                state.motion(
+                    (seed % 501) as f64 - 250.0,
+                    ((seed >> 16) % 501) as f64 - 250.0,
+                    rotation,
+                    step,
+                )
+            } else {
+                state.key(
+                    actions[seed as usize % actions.len()],
+                    seed & 0x100 != 0,
+                    rotation,
+                    step,
+                )
+            };
+            assert!(batch.error.is_none() || matches!(batch.error, Some(GameError::Capacity)));
+            for event in batch.into_iter().flatten() {
+                let HidEvent::Touch { phase, report } = event else {
+                    panic!("touch frame");
+                };
+                assert_eq!(report[0], 9);
+                assert!((1..=5).contains(&report[1]));
+                assert_eq!(&report[44..50], &step.to_le_bytes()[..6]);
+                let mut seen = [false; 5];
+                let mut next = [None; 5];
+                let mut began = 0;
+                let mut ended = 0;
+                for slot in 0..usize::from(report[1]) {
+                    let offset = 3 + slot * 5;
+                    let id = usize::from(report[offset] & 0x3f);
+                    assert!(id < 5 && !seen[id]);
+                    seen[id] = true;
+                    let xy = (
+                        u16::from_le_bytes([report[offset + 1], report[offset + 2]]),
+                        u16::from_le_bytes([report[offset + 3], report[offset + 4]]),
+                    );
+                    if report[offset] & 0xc0 == 0xc0 {
+                        began += usize::from(remote[id].is_none());
+                        if phase != TouchPhase::Move && remote[id].is_some() {
+                            assert_eq!(
+                                remote[id],
+                                Some(xy),
+                                "unrelated contact moved during transition"
+                            );
+                        }
+                        next[id] = Some(xy);
+                    } else {
+                        assert_eq!(report[offset] & 0xc0, 0);
+                        assert_eq!(
+                            remote[id],
+                            Some(xy),
+                            "release must retain its last coordinates"
+                        );
+                        ended += 1;
+                    }
+                }
+                for id in 0..5 {
+                    assert!(
+                        remote[id].is_none() || seen[id],
+                        "live contact omitted without a tombstone"
+                    );
+                }
+                match phase {
+                    TouchPhase::Begin => {
+                        assert!(began > 0);
+                        assert_eq!(ended, 0);
+                    }
+                    TouchPhase::End => {
+                        assert!(ended > 0);
+                        assert_eq!(began, 0);
+                    }
+                    TouchPhase::Move => {
+                        assert_eq!(began, 0);
+                        assert_eq!(ended, 0);
+                    }
+                }
+                remote = next;
+            }
+            for (id, contact) in state.contacts.iter().enumerate() {
+                assert_eq!(remote[id], contact.map(|c| (c.x, c.y)));
+            }
+            assert_eq!(
+                state.contacts[0].is_some(),
+                state.held[..4].iter().any(|&h| h)
+            );
+            assert_eq!(state.contacts[1].is_some(), state.look.is_some());
+            for action in BUTTONS {
+                assert_eq!(
+                    state.held[action as usize],
+                    state.contacts[2..]
+                        .iter()
+                        .flatten()
+                        .any(|c| c.action == Some(action))
+                );
+            }
+        }
+        assert_eq!(remote, [None; 5]);
+    }
 }

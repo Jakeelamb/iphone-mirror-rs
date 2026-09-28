@@ -13,6 +13,7 @@ pub struct Options {
     pub headless: bool,
     pub trace: Option<PathBuf>,
     pub measure_stamp: bool,
+    pub game_profile: Option<PathBuf>,
 }
 
 impl Options {
@@ -29,13 +30,14 @@ impl Options {
             headless: false,
             trace: None,
             measure_stamp: false,
+            game_profile: None,
         };
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--help" | "-h" => {
                     println!(
-                        "iphone-mirror-rs\n\nNative iPhone video and input. Requires an already paired, unlocked iPhone.\n\n  --connection auto|usb|wifi  Transport (default auto)\n  --address IP:PORT           Explicit Wi-Fi endpoint\n  --pairing-file PATH         Existing CoreDevice pairing record\n  --serial ID                 Select one paired device\n  --decoder auto|cuda|vaapi|software  Decoder preference (default auto)\n  --software                 Alias for --decoder software\n  --headless                 Decode and trace without opening a window\n  --duration SECONDS         Stop after 0.1–86400 s, including setup\n  --trace PATH               Write timing/counter traces to a new file\n  --measure-stamp            Measure synthetic latency-page frame timestamps\n\nControls: click/drag, wheel, keyboard; house button or F1 Home; F2 Spotlight.\nClosing the window releases input and stops the stream."
+                        "iphone-mirror-rs\n\nNative iPhone video and input. Requires an already paired, unlocked iPhone.\n\n  --connection auto|usb|wifi  Transport (default auto)\n  --address IP:PORT           Explicit Wi-Fi endpoint\n  --pairing-file PATH         Existing CoreDevice pairing record\n  --serial ID                 Select one paired device\n  --decoder auto|cuda|vaapi|software  Decoder preference (default auto)\n  --software                 Alias for --decoder software\n  --headless                 Decode and trace without opening a window\n  --duration SECONDS         Stop after 0.1–86400 s, including setup\n  --trace PATH               Write timing/counter traces to a new file\n  --measure-stamp            Measure synthetic latency-page frame timestamps\n  --game-profile PATH        Load/create calibrated game controls (F9 setup, F8 play)\n\nControls: click/drag, wheel, keyboard; house button or F1 Home; F2 Spotlight.\nClosing the window releases input and stops the stream."
                     );
                     return Ok(None);
                 }
@@ -75,6 +77,11 @@ impl Options {
                 }
                 "--software" => options.decoder = DecodeMode::Software,
                 "--headless" => options.headless = true,
+                "--game-profile" => {
+                    options.game_profile = Some(PathBuf::from(
+                        args.next().context("--game-profile requires a path")?,
+                    ));
+                }
                 "--measure-stamp" => options.measure_stamp = true,
                 "--duration" => {
                     let seconds = args
@@ -94,6 +101,9 @@ impl Options {
                 }
                 _ => bail!("unknown option; use --help"),
             }
+        }
+        if options.headless && options.game_profile.is_some() {
+            bail!("--game-profile requires a window");
         }
         Ok(Some(options))
     }

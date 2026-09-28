@@ -1,4 +1,5 @@
 mod app;
+mod game_ui;
 mod options;
 mod session;
 
@@ -18,6 +19,11 @@ fn main() -> Result<()> {
     let Some(options) = options::Options::parse()? else {
         return Ok(());
     };
+    let game = options
+        .game_profile
+        .clone()
+        .map(game_ui::GameControls::load)
+        .transpose()?;
     let _instance = iphone_mirror_rs::instance::InstanceGuard::acquire()?;
     // Third-party debug logs can include protocol payloads or credentials.
     let filter = EnvFilter::try_from_default_env()
@@ -85,6 +91,7 @@ fn main() -> Result<()> {
     });
     let gui_failed = if let Some(event_loop) = event_loop {
         let mut app = app::App::new(latest, input, metrics.clone(), stop_tx.clone());
+        app.game = game;
         event_loop.run_app(&mut app)?;
         app.failed
     } else {
