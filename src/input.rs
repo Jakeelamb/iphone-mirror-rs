@@ -7,15 +7,29 @@ use std::collections::VecDeque;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TouchPhase {
     Begin,
+    /// Game joystick origin. Preserve a delivery interval after this
+    /// report so the phone establishes the anchor before its first movement.
+    /// This is scheduling metadata; the HID report layout is unchanged.
+    AnchorBegin,
     Move,
     End,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HidEvent {
-    Touch { phase: TouchPhase, report: [u8; 58] },
+    Touch {
+        phase: TouchPhase,
+        report: [u8; 58],
+    },
+    /// Release the transport's current contacts after discarding queued touch
+    /// frames; coordinates come from the last report actually dispatched.
+    ReleaseTouches {
+        timestamp: u64,
+    },
     Keyboard([u8; 39]),
-    Home { pressed: bool },
+    Home {
+        pressed: bool,
+    },
 }
 
 pub fn touchscreen_report(pressed: bool, x: u16, y: u16, timestamp: u64) -> [u8; 58] {
@@ -217,6 +231,23 @@ impl InputQueue {
     pub fn pop(&mut self) -> Option<HidEvent> {
         self.events.pop_front()
     }
+    /// Cancel pending game touches without replaying stale coordinates. Keep
+    /// keyboard/Home transitions, but release dispatched touches before them
+    /// or any subsequent touch. Report a full non-touch queue to the caller.
+    pub fn cancel_touches(&mut self, timestamp: u64) -> Result<(), HidEvent> {
+        self.events.retain(|event| {
+            !matches!(
+                event,
+                HidEvent::Touch { .. } | HidEvent::ReleaseTouches { .. }
+            )
+        });
+        let reset = HidEvent::ReleaseTouches { timestamp };
+        if self.events.len() == self.limit {
+            return Err(reset);
+        }
+        self.events.push_front(reset);
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -326,6 +357,82 @@ mod tests {
         assert_eq!(q.pop(), Some(down));
         assert_eq!(q.pop(), Some(latest));
         assert_eq!(q.pop(), Some(up));
+    }
+    #[test]
+    fn anchor_begin_survives_move_coalescing() {
+        let mut q = InputQueue::new(2);
+        let anchor = HidEvent::Touch {
+            phase: TouchPhase::AnchorBegin,
+            report: touchscreen_report(true, 100, 100, 0),
+        };
+        q.try_push(anchor).unwrap();
+        for x in 101..110 {
+            q.try_push(HidEvent::Touch {
+                phase: TouchPhase::Move,
+                report: touchscreen_report(true, x, 100, 1),
+            })
+            .unwrap();
+        }
+        assert_eq!(q.pop(), Some(anchor));
+        assert_eq!(
+            q.pop(),
+            Some(HidEvent::Touch {
+                phase: TouchPhase::Move,
+                report: touchscreen_report(true, 109, 100, 1),
+            })
+        );
+        assert!(q.pop().is_none());
+    }
+    #[test]
+    fn touch_cancellation_preserves_keys_and_home_and_precedes_new_touches() {
+        let mut q = InputQueue::new(6);
+        let anchor = HidEvent::Touch {
+            phase: TouchPhase::AnchorBegin,
+            report: touchscreen_report(true, 100, 200, 0),
+        };
+        let keyboard = HidEvent::Keyboard(keyboard_report(&[1; 30], 1));
+        let home = HidEvent::Home { pressed: true };
+        q.try_push(anchor).unwrap();
+        q.try_push(keyboard).unwrap();
+        q.try_push(HidEvent::ReleaseTouches { timestamp: 2 })
+            .unwrap();
+        q.try_push(home).unwrap();
+        q.try_push(HidEvent::Touch {
+            phase: TouchPhase::Move,
+            report: touchscreen_report(true, 300, 400, 3),
+        })
+        .unwrap();
+        q.cancel_touches(4).unwrap();
+        q.try_push(anchor).unwrap(); // a new game can start after the reset
+        assert_eq!(q.pop(), Some(HidEvent::ReleaseTouches { timestamp: 4 }));
+        assert_eq!(q.pop(), Some(keyboard));
+        assert_eq!(q.pop(), Some(home));
+        assert_eq!(q.pop(), Some(anchor));
+        assert!(q.pop().is_none());
+    }
+    #[test]
+    fn repeated_touch_cancellation_replaces_reset_without_losing_capacity() {
+        let mut q = InputQueue::new(1);
+        q.cancel_touches(1).unwrap();
+        q.cancel_touches(2).unwrap();
+        assert_eq!(q.pop(), Some(HidEvent::ReleaseTouches { timestamp: 2 }));
+        assert!(q.pop().is_none());
+    }
+    #[test]
+    fn touch_cancellation_reports_full_non_touch_queue_without_dropping_it() {
+        let mut q = InputQueue::new(1);
+        let home = HidEvent::Home { pressed: false };
+        q.try_push(home).unwrap();
+        assert_eq!(
+            q.cancel_touches(3),
+            Err(HidEvent::ReleaseTouches { timestamp: 3 })
+        );
+        assert_eq!(q.pop(), Some(home));
+        assert!(q.pop().is_none());
+        assert_eq!(
+            InputQueue::new(0).cancel_touches(4),
+            Err(HidEvent::ReleaseTouches { timestamp: 4 })
+        );
     }
     #[test]
     fn ascii_and_wheel() {

@@ -335,6 +335,12 @@ fn release_touch_contacts(report: &mut [u8; 58]) {
     }
 }
 
+fn touch_reset_report(mut report: [u8; 58], timestamp: u64) -> [u8; 58] {
+    release_touch_contacts(&mut report);
+    report[44..50].copy_from_slice(&timestamp.to_le_bytes()[..6]);
+    report
+}
+
 impl HidChannels {
     pub async fn send(&mut self, event: &crate::input::HidEvent) -> Result<()> {
         use crate::input::HidEvent;
@@ -347,6 +353,16 @@ impl HidChannels {
                 }
                 self.universal.send_report(257, report.to_vec()).await?;
                 if !has_contact {
+                    self.touch = None;
+                }
+            }
+            HidEvent::ReleaseTouches { timestamp } => {
+                if let Some(report) = self.touch {
+                    let report = touch_reset_report(report, *timestamp);
+                    // Retain the fresh release for cleanup if this write fails
+                    // or is interrupted by session shutdown.
+                    self.touch = Some(report);
+                    self.universal.send_report(257, report.to_vec()).await?;
                     self.touch = None;
                 }
             }
@@ -601,7 +617,9 @@ async fn discover() -> Result<Vec<SocketAddr>> {
 
 #[cfg(test)]
 mod response_tests {
-    use super::{error_code, parse_response, release_touch_contacts, touch_states};
+    use super::{
+        error_code, parse_response, release_touch_contacts, touch_reset_report, touch_states,
+    };
     use anyhow::{Context, Result};
 
     #[test]
@@ -649,6 +667,29 @@ mod response_tests {
             report,
             crate::input::touchscreen_report(false, 300, 400, 123)
         );
+    }
+
+    #[test]
+    fn touch_reset_uses_delivered_contact_positions_and_new_timestamp() -> Result<()> {
+        use idevice::core_device::hid::{TouchscreenContact, build_multitouch_report};
+        let mut contacts = [0, 2, 4].map(|identity| TouchscreenContact {
+            identity,
+            touching: true,
+            x: 100 + u16::from(identity),
+            y: 200 + u16::from(identity),
+        });
+        let prior = build_multitouch_report(&contacts, Some(1))?;
+        let prior: [u8; 58] = prior
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("report size"))?;
+        for contact in &mut contacts {
+            contact.touching = false;
+        }
+        assert_eq!(
+            touch_reset_report(prior, 0xffff_1234_5678_9abc).as_slice(),
+            build_multitouch_report(&contacts, Some(0xffff_1234_5678_9abc))?
+        );
+        Ok(())
     }
 
     #[test]

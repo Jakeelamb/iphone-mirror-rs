@@ -1,10 +1,10 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use iphone_mirror_rs::device::{DeviceOptions, DeviceSession, HidChannels, OrientationSource};
-use iphone_mirror_rs::input::{HidEvent, InputQueue};
+use iphone_mirror_rs::input::{HidEvent, InputQueue, TouchPhase};
 use iphone_mirror_rs::metrics::Metrics;
 use iphone_mirror_rs::rtp::{HevcDepacketizer, picture_loss_indication, receiver_report};
 use iphone_mirror_rs::video::{DecodeMode, Decoder, LatestFrame};
@@ -17,6 +17,8 @@ pub struct InputBus {
     queue: Mutex<InputQueue>,
     failed: AtomicBool,
     wake: Notify,
+    reset: Notify,
+    reset_generation: AtomicU64,
 }
 
 impl InputBus {
@@ -25,6 +27,8 @@ impl InputBus {
             queue: Mutex::new(InputQueue::new(128)),
             failed: AtomicBool::new(false),
             wake: Notify::new(),
+            reset: Notify::new(),
+            reset_generation: AtomicU64::new(0),
         }
     }
 
@@ -40,15 +44,35 @@ impl InputBus {
         success
     }
 
+    #[cfg(test)]
     pub(crate) fn pop(&self) -> Result<Option<HidEvent>> {
+        Ok(self.pop_with_generation()?.map(|(event, _)| event))
+    }
+
+    pub fn cancel_game(&self, timestamp: u64) -> bool {
+        let success = self.queue.lock().is_ok_and(|mut queue| {
+            let success = queue.cancel_touches(timestamp).is_ok();
+            self.reset_generation.fetch_add(1, Ordering::AcqRel);
+            success
+        });
+        if !success {
+            self.failed.store(true, Ordering::Release);
+        }
+        self.reset.notify_one();
+        self.wake.notify_one();
+        success
+    }
+
+    fn pop_with_generation(&self) -> Result<Option<(HidEvent, u64)>> {
         if self.failed.load(Ordering::Acquire) {
             bail!("input queue overflow; ending session to release held input");
         }
-        Ok(self
+        let mut queue = self
             .queue
             .lock()
-            .map_err(|_| anyhow::anyhow!("input queue unavailable"))?
-            .pop())
+            .map_err(|_| anyhow::anyhow!("input queue unavailable"))?;
+        let generation = self.reset_generation.load(Ordering::Acquire);
+        Ok(queue.pop().map(|event| (event, generation)))
     }
 }
 
@@ -79,13 +103,34 @@ async fn input_worker(
                 biased;
                 _ = stop.changed() => break,
                 _ = input.wake.notified() => {
-                    while let Some(event) = input.pop()? {
+                    while let Some((event, generation)) = input.pop_with_generation()? {
                         if *stop.borrow() { return Ok(()); }
+                        if matches!(event, HidEvent::Touch { .. })
+                            && input.reset_generation.load(Ordering::Acquire) != generation
+                        {
+                            continue;
+                        }
                         tokio::select! {
                             biased;
                             _ = stop.changed() => return Ok(()),
                             sent = tokio::time::timeout(Duration::from_secs(2), hid.send(&event)) => {
                                 sent.context("input send deadline exceeded")??;
+                            }
+                        }
+                        if matches!(event, HidEvent::Touch { phase: TouchPhase::AnchorBegin, .. })
+                        {
+                            // Let the phone sample a new joystick center
+                            // before movement. Back-to-back delivery collapsed
+                            // the center and first displacement in live testing.
+                            // Ordinary taps and ongoing movement do not wait.
+                            let deadline = tokio::time::Instant::now() + Duration::from_millis(20);
+                            while input.reset_generation.load(Ordering::Acquire) == generation {
+                                tokio::select! {
+                                    biased;
+                                    _ = stop.changed() => return Ok(()),
+                                    _ = input.reset.notified() => {},
+                                    _ = tokio::time::sleep_until(deadline) => break,
+                                }
                             }
                         }
                     }
@@ -442,6 +487,172 @@ pub async fn run(
 #[cfg(test)]
 mod input_tests {
     use super::*;
+
+    struct RecordedInput {
+        sent: mpsc::UnboundedSender<HidEvent>,
+        first_send_gate: Option<Arc<Notify>>,
+        closed: Arc<AtomicBool>,
+    }
+
+    impl InputSink for RecordedInput {
+        async fn send(&mut self, event: &HidEvent) -> Result<()> {
+            self.sent.send(*event)?;
+            if let Some(gate) = self.first_send_gate.take() {
+                gate.notified().await;
+            }
+            Ok(())
+        }
+        async fn close(&mut self) -> Result<()> {
+            self.closed.store(true, Ordering::Release);
+            Ok(())
+        }
+    }
+
+    async fn poll_worker_once(worker: std::pin::Pin<&mut impl std::future::Future>) {
+        let mut worker = worker;
+        std::future::poll_fn(|context| {
+            assert!(worker.as_mut().poll(context).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+    }
+
+    async fn cancel_backlog(inflight: bool) -> Result<()> {
+        let bus = Arc::new(InputBus::new());
+        let report = iphone_mirror_rs::input::touchscreen_report(true, 100, 200, 1);
+        let anchor = HidEvent::Touch {
+            phase: TouchPhase::AnchorBegin,
+            report,
+        };
+        let movement = HidEvent::Touch {
+            phase: TouchPhase::Move,
+            report,
+        };
+        for _ in 0..20 {
+            assert!(bus.push(anchor));
+            assert!(bus.push(movement));
+        }
+        let home = HidEvent::Home { pressed: true };
+        let keyboard = HidEvent::Keyboard([0; 39]);
+        assert!(bus.push(home));
+        assert!(bus.push(keyboard));
+        let (sent, mut received) = mpsc::unbounded_channel();
+        let closed = Arc::new(AtomicBool::new(false));
+        let gate = Arc::new(Notify::new());
+        let sink = RecordedInput {
+            sent,
+            first_send_gate: inflight.then(|| gate.clone()),
+            closed: closed.clone(),
+        };
+        let (stop, receiver) = watch::channel(false);
+        let worker = input_worker(sink, bus.clone(), receiver);
+        tokio::pin!(worker);
+        poll_worker_once(worker.as_mut()).await;
+        assert_eq!(received.try_recv()?, anchor);
+        assert!(received.try_recv().is_err());
+
+        assert!(bus.cancel_game(2));
+        assert!(bus.push(anchor));
+        assert!(bus.push(movement));
+        poll_worker_once(worker.as_mut()).await;
+        if inflight {
+            // Reset never drops an in-progress XPC write. Its original future
+            // remains pending until completion, then the reset takes priority.
+            assert!(received.try_recv().is_err());
+            gate.notify_one();
+            poll_worker_once(worker.as_mut()).await;
+        }
+        assert_eq!(
+            received.try_recv()?,
+            HidEvent::ReleaseTouches { timestamp: 2 }
+        );
+        assert_eq!(received.try_recv()?, home);
+        assert_eq!(received.try_recv()?, keyboard);
+        assert_eq!(received.try_recv()?, anchor);
+        // Stale reset notifications must not bypass the new anchor's dwell.
+        assert!(received.try_recv().is_err());
+        stop.send(true)?;
+        worker.await?;
+        assert!(closed.load(Ordering::Acquire));
+        assert!(received.recv().await.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn game_cancel_discards_anchor_backlog_and_resets_before_future_input() -> Result<()> {
+        cancel_backlog(false).await
+    }
+
+    #[tokio::test]
+    async fn game_cancel_finishes_inflight_write_before_reset() -> Result<()> {
+        cancel_backlog(true).await
+    }
+
+    struct DispatchInput {
+        sent: mpsc::UnboundedSender<Instant>,
+        closed: Arc<AtomicBool>,
+    }
+
+    impl InputSink for DispatchInput {
+        async fn send(&mut self, _: &HidEvent) -> Result<()> {
+            self.sent.send(Instant::now())?;
+            Ok(())
+        }
+        async fn close(&mut self) -> Result<()> {
+            self.closed.store(true, Ordering::Release);
+            Ok(())
+        }
+    }
+
+    async fn queued_dispatch(first_phase: TouchPhase, cancel_during_dwell: bool) -> Result<()> {
+        let bus = Arc::new(InputBus::new());
+        let report = iphone_mirror_rs::input::touchscreen_report(true, 100, 200, 1);
+        for phase in [first_phase, TouchPhase::Move] {
+            assert!(bus.push(HidEvent::Touch { phase, report }));
+        }
+        let (sent, mut received) = mpsc::unbounded_channel();
+        let closed = Arc::new(AtomicBool::new(false));
+        let sink = DispatchInput {
+            sent,
+            closed: closed.clone(),
+        };
+        let (stop, receiver) = watch::channel(false);
+        let worker = tokio::spawn(input_worker(sink, bus, receiver));
+        let first = tokio::time::timeout(Duration::from_secs(1), received.recv())
+            .await?
+            .context("Begin must be sent")?;
+        if first_phase == TouchPhase::Begin {
+            // Both ready sends are polled in the same worker turn. A dwell
+            // would leave the second event absent until its timer completed.
+            assert!(received.try_recv().is_ok());
+        } else if !cancel_during_dwell {
+            let second = tokio::time::timeout(Duration::from_secs(1), received.recv())
+                .await?
+                .context("Move must be sent")?;
+            assert!(second.duration_since(first) >= Duration::from_millis(20));
+        }
+        stop.send(true)?;
+        tokio::time::timeout(Duration::from_millis(200), worker).await???;
+        assert!(closed.load(Ordering::Acquire));
+        assert!(received.recv().await.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn anchor_dispatch_delays_first_move() -> Result<()> {
+        queued_dispatch(TouchPhase::AnchorBegin, false).await
+    }
+
+    #[tokio::test]
+    async fn anchor_dispatch_cancellation_skips_move_and_runs_cleanup() -> Result<()> {
+        queued_dispatch(TouchPhase::AnchorBegin, true).await
+    }
+
+    #[tokio::test]
+    async fn ordinary_begin_dispatch_has_no_dwell() -> Result<()> {
+        queued_dispatch(TouchPhase::Begin, false).await
+    }
+
     #[test]
     fn overflowing_transitions_fail_session_instead_of_dropping_release() {
         let bus = InputBus::new();

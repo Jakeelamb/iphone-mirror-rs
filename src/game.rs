@@ -402,15 +402,14 @@ impl GameState {
         }
         if (action as usize) < 4 {
             self.held[action as usize] = pressed;
-            if !self.held[..4].iter().any(|&h| h) {
-                self.release_slot(0, timestamp, &mut batch);
-                return batch;
-            }
             let center = self.point(Target::Joystick);
             if self.contacts[0].is_none() {
                 self.contacts[0] = Some(self.contact(center, None));
-                batch.push(self.report(TouchPhase::Begin, 0, timestamp));
+                batch.push(self.report(TouchPhase::AnchorBegin, 0, timestamp));
             }
+            // Keep the established origin while idle. Returning to center
+            // stops movement immediately, without restarting the gesture on
+            // the next direction key. release_all still lifts every contact.
             let dx = i32::from(self.held[Action::Right as usize])
                 - i32::from(self.held[Action::Left as usize]);
             let dy = i32::from(self.held[Action::Down as usize])
@@ -654,7 +653,7 @@ mod tests {
         s.set_aspect(2.0).unwrap();
         let initial = reports(s.key(Action::Up, true, 0, 0));
         assert_eq!(initial.len(), 2);
-        assert_eq!(initial[0].0, TouchPhase::Begin);
+        assert_eq!(initial[0].0, TouchPhase::AnchorBegin);
         assert_eq!(contact(&initial[0].1, 0), Some((true, 32768, 32768)));
         let diagonal = reports(s.key(Action::Right, true, 0, 1));
         let (_, x, y) = contact(&diagonal[0].1, 0).unwrap();
@@ -669,7 +668,78 @@ mod tests {
             reports(s.key(a, false, 0, 4));
         }
         let release = reports(s.key(Action::Right, false, 0, 5));
-        assert_eq!(release[0].0, TouchPhase::End);
+        assert_eq!(release[0].0, TouchPhase::Move);
+        assert_eq!(contact(&release[0].1, 0), Some((true, 32768, 32768)));
+    }
+
+    #[test]
+    fn only_joystick_origin_requests_anchor_delivery_spacing() {
+        let mut s = state();
+        let button = reports(s.key(Action::Aim, true, 0, 0));
+        assert_eq!(button[0].0, TouchPhase::Begin);
+        let joystick = reports(s.key(Action::Up, true, 0, 1));
+        assert_eq!(joystick.len(), 2);
+        assert_eq!(joystick[0].0, TouchPhase::AnchorBegin);
+        assert_eq!(joystick[1].0, TouchPhase::Move);
+        let look = reports(s.motion(1.0, 0.0, 0, 2));
+        assert_eq!(look.len(), 2);
+        assert_eq!(look[0].0, TouchPhase::Begin);
+        assert_eq!(look[1].0, TouchPhase::Move);
+        assert_eq!(
+            reports(s.key(Action::Right, true, 0, 3))[0].0,
+            TouchPhase::Move
+        );
+        assert_eq!(
+            reports(s.key(Action::LeanLeft, true, 0, 4))[0].0,
+            TouchPhase::Begin
+        );
+    }
+
+    #[test]
+    fn short_direction_handoffs_stop_at_center_without_restarting_any_contact() {
+        use crate::input::InputQueue;
+        for gap_ms in [5u64, 10, 20, 30] {
+            let mut s = state();
+            s.set_aspect(2.0).unwrap();
+            reports(s.key(Action::Up, true, 0, 0));
+            reports(s.key(Action::LeanLeft, true, 0, 1_000_000));
+            let looking = reports(s.motion(2.0, 1.0, 0, 2_000_000));
+            let look = contact(&looking.last().unwrap().1, 1).unwrap();
+            let lean = contact(&looking.last().unwrap().1, 2).unwrap();
+            let neutral = s.key(Action::Up, false, 0, 100_000_000);
+            let mut queue = InputQueue::new(128);
+            for event in neutral.into_iter().flatten() {
+                queue.try_push(event).unwrap();
+            }
+            let HidEvent::Touch { phase, report } = queue.pop().unwrap() else {
+                panic!("neutral frame");
+            };
+            assert_eq!(phase, TouchPhase::Move);
+            assert_eq!(&report[44..50], &100_000_000u64.to_le_bytes()[..6]);
+            assert_eq!(contact(&report, 0), Some((true, 32768, 32768)));
+            assert_eq!(contact(&report, 1), Some(look));
+            assert_eq!(contact(&report, 2), Some(lean));
+            assert!(queue.pop().is_none());
+            let next = s.key(Action::Right, true, 0, (100 + gap_ms) * 1_000_000);
+            for event in next.into_iter().flatten() {
+                queue.try_push(event).unwrap();
+            }
+            let HidEvent::Touch { phase, report } = queue.pop().unwrap() else {
+                panic!("new direction");
+            };
+            assert_eq!(phase, TouchPhase::Move); // no lift or new anchored touchdown
+            assert_eq!(contact(&report, 0), Some((true, 35389, 32768)));
+            assert_eq!(contact(&report, 1), Some(look));
+            assert_eq!(contact(&report, 2), Some(lean));
+            assert!(queue.pop().is_none());
+            reports(s.key(Action::Right, false, 0, 150_000_000));
+            let lifted = reports(s.release_all(160_000_000));
+            assert_eq!(lifted.len(), 1);
+            assert_eq!(lifted[0].0, TouchPhase::End);
+            assert_eq!(contact(&lifted[0].1, 0), Some((false, 32768, 32768)));
+            assert_eq!(contact(&lifted[0].1, 1), Some((false, look.1, look.2)));
+            assert_eq!(contact(&lifted[0].1, 2), Some((false, lean.1, lean.2)));
+        }
     }
     #[test]
     fn look_recenter_preserves_other_contacts_and_marks_transitions() {
@@ -806,7 +876,7 @@ mod tests {
                     );
                 }
                 match phase {
-                    TouchPhase::Begin => {
+                    TouchPhase::Begin | TouchPhase::AnchorBegin => {
                         assert!(began > 0);
                         assert_eq!(ended, 0);
                     }
@@ -824,10 +894,7 @@ mod tests {
             for (id, contact) in state.contacts.iter().enumerate() {
                 assert_eq!(remote[id], contact.map(|c| (c.x, c.y)));
             }
-            assert_eq!(
-                state.contacts[0].is_some(),
-                state.held[..4].iter().any(|&h| h)
-            );
+            assert!(!state.held[..4].iter().any(|&h| h) || state.contacts[0].is_some());
             assert_eq!(state.contacts[1].is_some(), state.look.is_some());
             for action in BUTTONS {
                 assert_eq!(

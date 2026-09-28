@@ -36,12 +36,19 @@ editor and set both **Double Tap Effect** settings to **No Double Tap Action**.
 Otherwise repeated joystick presses or look recentering can trigger ping/melee
 shortcuts. The viewer does not change these game settings automatically.
 
+Enable **Lock Joystick in Place** so its origin matches your calibration.
+For manual firing, set **Gameplay → Input → ADS Auto-Shoot Behavior** and
+**Hip Fire Auto-Shoot Behavior** to **Off**. Hip-fire auto-shoot can also enter
+ADS when a target is out of range; that behavior comes from the game.
+
 ## Play
 
 Focus the mirror and press **F8**. The cursor locks and hides; **Escape** or F8
 releases every contact and restores it. Focus loss also exits. F1 releases game
 controls before sending Home. The viewer refuses capture if pointer locking is
 unavailable, rather than letting aiming stop at the desktop edge.
+Exiting discards queued game gestures and releases the contacts already sent
+to the phone, so pending look recenters do not replay after Escape.
 
 | Input | Touch target |
 | --- | --- |
@@ -60,6 +67,10 @@ A bound button stays touched until its key/button is released. Choose hold or
 toggle behavior in the game's settings. Unbound keys and the scroll wheel are
 suppressed while captured, so movement keys cannot accidentally type into a
 text field. Exit game mode to use menus or normal keyboard input.
+
+After the first movement press, the joystick contact stays down at its center
+when you release WASD. This stops movement without restarting the touch during
+quick direction changes. Escape, focus loss and leaving game mode lift it.
 
 ## Tuning and limits
 
@@ -81,6 +92,12 @@ that region's edge. This is touch-based aiming: sensitivity, acceleration,
 touch sampling and game behavior still apply. It is not guaranteed to behave
 like native PC raw-mouse input.
 
+A new joystick drag holds its center for 20 ms before moving. Back-to-back
+down/move reports were merged on the tested phone, losing the initial drag.
+Ordinary direction changes, looking and button presses add no such delay,
+although they can wait behind the initial joystick press in the ordered input
+queue. The joystick pays this setup cost once per game-mode entry.
+
 ## Live qualification
 
 Tested over Wi-Fi with an iPhone 15 / iOS 27 in Rainbow Six Mobile's shooting
@@ -91,6 +108,13 @@ and lean was exercised. These checks used an isolated Sway desktop; physical
 mouse sensitivity remains a personal tuning setting. The contextual interact
 mapping has not been qualified against an eligible interaction in that range.
 The Safari diagnostic below has not been live-qualified on this phone.
+
+Direction-change debugging reproduced lost initial joystick displacement with
+back-to-back reports and verified movement after adding the initial 20 ms
+spacing. Short WASD handoffs with look/lean held, neutral stopping, manual fire
+and Escape were checked in the range. With both auto-shoot options off, hovering
+over a training target did not fire or enter ADS. These are functional checks,
+not a measurement of end-to-end input latency or a guarantee of PC-like aiming.
 
 ## Diagnostic page
 

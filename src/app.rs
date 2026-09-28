@@ -337,7 +337,9 @@ impl App {
                 let sample = samples[index];
                 let timestamp = self.timestamp();
                 let event = match sample.phase {
-                    TouchPhase::Begin => self.controls.touch_begin(sample.x, sample.y, timestamp),
+                    TouchPhase::Begin | TouchPhase::AnchorBegin => {
+                        self.controls.touch_begin(sample.x, sample.y, timestamp)
+                    }
                     TouchPhase::Move => self.controls.touch_move(sample.x, sample.y, timestamp),
                     TouchPhase::End => self.controls.touch_end(timestamp),
                 };
@@ -385,8 +387,18 @@ impl App {
 
     fn exit_game(&mut self) {
         let timestamp = self.timestamp();
-        if let Some(mut state) = self.game.as_mut().and_then(|game| game.state.take()) {
-            self.send_game(state.release_all(timestamp));
+        if self
+            .game
+            .as_mut()
+            .and_then(|game| game.state.take())
+            .is_some()
+        {
+            // The device releases its delivered contacts. Queued game states
+            // may be ahead of it, especially during a look recenter.
+            if !self.input.cancel_game(timestamp) {
+                self.failed = true;
+                let _ = self.stop.send(true);
+            }
             if let Some(window) = &self.window {
                 let _ = window.set_cursor_grab(CursorGrabMode::None);
                 window.set_cursor_visible(true);
@@ -860,19 +872,7 @@ mod tests {
         app.key(KeyCode::Escape, true);
         assert!(!app.game_active());
         let sent = events(&app);
-        let [
-            HidEvent::Touch {
-                phase: TouchPhase::End,
-                report,
-            },
-        ] = sent.as_slice()
-        else {
-            panic!("release frame")
-        };
-        assert_eq!(report[1], 3);
-        for slot in 0..3 {
-            assert_eq!(report[3 + slot * 5] & 0xc0, 0);
-        }
+        assert!(matches!(sent.as_slice(), [HidEvent::ReleaseTouches { .. }]));
         app.release();
         assert!(events(&app).is_empty());
     }
@@ -891,10 +891,7 @@ mod tests {
             assert!(!app.game_active());
             assert!(matches!(
                 events(&app).as_slice(),
-                [HidEvent::Touch {
-                    phase: TouchPhase::End,
-                    ..
-                }]
+                [HidEvent::ReleaseTouches { .. }]
             ));
         }
     }
@@ -907,14 +904,37 @@ mod tests {
         assert!(matches!(
             events(&app).as_slice(),
             [
-                HidEvent::Touch {
-                    phase: TouchPhase::End,
-                    ..
-                },
+                HidEvent::ReleaseTouches { .. },
                 HidEvent::Home { pressed: true }
             ]
         ));
         assert!(!app.game_active());
+    }
+    #[test]
+    fn escape_discards_queued_game_gestures_before_normal_input() {
+        let mut app = with_game();
+        app.key(KeyCode::KeyW, true);
+        app.game_action(Action::Fire, true);
+        for _ in 0..20 {
+            let batch = app
+                .game
+                .as_mut()
+                .unwrap()
+                .state
+                .as_mut()
+                .unwrap()
+                .motion(100.0, 0.0, 0, 1);
+            app.send_game(batch);
+        }
+        app.key(KeyCode::Escape, true);
+        app.key(KeyCode::F1, true);
+        assert!(matches!(
+            events(&app).as_slice(),
+            [
+                HidEvent::ReleaseTouches { .. },
+                HidEvent::Home { pressed: true }
+            ]
+        ));
     }
     #[test]
     fn rotation_releases_contacts_and_cancels_old_scroll_coordinates() {
