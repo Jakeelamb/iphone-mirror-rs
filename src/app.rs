@@ -6,14 +6,14 @@ use iphone_mirror_rs::input::{
     HidEvent, InputState, TouchPhase, TouchSample, ascii_usage, normalized_position, wheel_gesture,
 };
 use iphone_mirror_rs::metrics::Metrics;
-use iphone_mirror_rs::video::{DecodedFrame, LatestFrame, Renderer};
+use iphone_mirror_rs::video::{DecodedFrame, LatestFrame, Renderer, ViewerLayout};
 use tokio::sync::watch;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::keyboard::{Key, KeyCode, PhysicalKey};
-use winit::window::{Window, WindowId};
+use winit::window::{CursorIcon, Window, WindowId};
 
 use crate::session::InputBus;
 
@@ -37,6 +37,8 @@ pub struct App {
     key_chords: [Option<(u8, bool)>; 240],
     spotlight: bool,
     mouse_down: bool,
+    home_armed: bool,
+    keyboard_home: bool,
     pointer: PhysicalPosition<f64>,
     wheel: Option<([TouchSample; 10], usize, Instant)>,
     pending_scroll: f64,
@@ -66,6 +68,8 @@ impl App {
             key_chords: [None; 240],
             spotlight: false,
             mouse_down: false,
+            home_armed: false,
+            keyboard_home: false,
             pointer: PhysicalPosition::new(0.0, 0.0),
             wheel: None,
             pending_scroll: 0.0,
@@ -96,32 +100,56 @@ impl App {
         self.held_usages.fill(0);
         self.key_chords.fill(None);
         self.spotlight = false;
+        self.home_armed = false;
+        self.keyboard_home = false;
         for event in self.controls.release_all(self.timestamp()) {
             self.send(event);
         }
     }
 
-    fn position(&self, clamp: bool) -> Option<(f64, f64)> {
+    fn layout(&self) -> Option<ViewerLayout> {
         let window = self.window.as_ref()?;
         let frame = self.frame.as_ref()?;
         let size = window.inner_size();
-        let scale = (f64::from(size.width) / f64::from(frame.width))
-            .min(f64::from(size.height) / f64::from(frame.height));
-        if scale <= 0.0 {
-            return None;
+        Some(ViewerLayout::new(
+            size.width,
+            size.height,
+            frame.width,
+            frame.height,
+            window.scale_factor(),
+        ))
+    }
+
+    fn position(&self, clamp: bool) -> Option<(f64, f64)> {
+        self.layout()?
+            .screen_position(self.pointer.x, self.pointer.y, clamp)
+    }
+
+    fn home_hit(&self) -> bool {
+        self.layout()
+            .is_some_and(|layout| layout.home_contains(self.pointer.x, self.pointer.y))
+    }
+
+    fn update_home_visual(&mut self) {
+        let hovered = self.connected && self.focused && self.home_hit();
+        let changed = self
+            .renderer
+            .as_mut()
+            .is_some_and(|renderer| renderer.set_home_state(hovered, hovered && self.home_armed));
+        if let Some(window) = &self.window {
+            window.set_cursor(if hovered {
+                CursorIcon::Pointer
+            } else {
+                CursorIcon::Default
+            });
+            if changed {
+                window.request_redraw();
+            }
         }
-        let width = f64::from(frame.width) * scale;
-        let height = f64::from(frame.height) * scale;
-        let x = (self.pointer.x - (f64::from(size.width) - width) / 2.0) / width;
-        let y = (self.pointer.y - (f64::from(size.height) - height) / 2.0) / height;
-        if !clamp && (!(0.0..=1.0).contains(&x) || !(0.0..=1.0).contains(&y)) {
-            return None;
-        }
-        Some((x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)))
     }
 
     fn start_scroll(&mut self) {
-        if self.mouse_down || !self.focused || !self.connected {
+        if self.mouse_down || self.home_armed || !self.focused || !self.connected {
             self.pending_scroll = 0.0;
             return;
         }
@@ -156,6 +184,7 @@ impl App {
     fn key_event(&mut self, code: KeyCode, pressed: bool, character: Option<char>) {
         let timestamp = self.timestamp();
         if code == KeyCode::F1 {
+            self.keyboard_home = pressed;
             let event = self.controls.home(pressed);
             self.send(event);
         } else if code == KeyCode::F2 {
@@ -210,6 +239,25 @@ impl App {
         }
     }
 
+    fn pointer_button(&mut self, pressed: bool, home_hit: bool, position: Option<(u16, u16)>) {
+        if pressed {
+            self.home_armed = home_hit;
+            self.mouse_button(true, if home_hit { None } else { position });
+        } else {
+            let activate = self.home_armed && home_hit;
+            self.home_armed = false;
+            self.mouse_button(false, None);
+            // A click is a complete Home tap. Do not release a Home key still
+            // held by F1, and do not send phone touches for the toolbar button.
+            if activate && !self.keyboard_home {
+                let event = self.controls.home(true);
+                self.send(event);
+                let event = self.controls.home(false);
+                self.send(event);
+            }
+        }
+    }
+
     fn advance_scroll(&mut self, now: Instant) {
         if !self.focused || !self.connected {
             if self.wheel.is_some() {
@@ -249,7 +297,8 @@ impl ApplicationHandler<AppEvent> for App {
                 event_loop.create_window(
                     Window::default_attributes()
                         .with_title("iPhone Mirror · Connecting")
-                        .with_inner_size(LogicalSize::new(400.0, 870.0)),
+                        .with_inner_size(LogicalSize::new(400.0, 918.0))
+                        .with_min_inner_size(LogicalSize::new(180.0, 240.0)),
                 )?,
             );
             let renderer = pollster::block_on(Renderer::new(window.clone()))?;
@@ -273,6 +322,7 @@ impl ApplicationHandler<AppEvent> for App {
         match event {
             AppEvent::Connected => {
                 self.connected = true;
+                self.update_home_visual();
                 if let Some(window) = &self.window {
                     window.set_title("iPhone Mirror");
                 }
@@ -302,11 +352,21 @@ impl ApplicationHandler<AppEvent> for App {
                 if !focused {
                     self.release();
                 }
+                self.update_home_visual();
+            }
+            WindowEvent::ScaleFactorChanged { .. } => {
+                self.home_armed = false;
+                self.update_home_visual();
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
             }
             WindowEvent::Resized(size) => {
+                self.home_armed = false;
                 if let Some(renderer) = &mut self.renderer {
                     renderer.resize(size.width, size.height);
                 }
+                self.update_home_visual();
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
@@ -314,8 +374,15 @@ impl ApplicationHandler<AppEvent> for App {
             WindowEvent::RedrawRequested => {
                 let fresh = self.latest.take();
                 let changed = fresh.is_some();
-                if fresh.is_some() {
-                    self.frame = fresh;
+                if let Some(fresh) = fresh {
+                    let geometry_changed = self.frame.as_ref().is_none_or(|previous| {
+                        (previous.width, previous.height) != (fresh.width, fresh.height)
+                    });
+                    self.frame = Some(fresh);
+                    if geometry_changed {
+                        self.home_armed = false;
+                        self.update_home_visual();
+                    }
                 }
                 if let (Some(renderer), Some(frame)) = (&mut self.renderer, &self.frame) {
                     match renderer.render(frame) {
@@ -338,6 +405,7 @@ impl ApplicationHandler<AppEvent> for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.pointer = position;
+                self.update_home_visual();
                 if self.focused
                     && self.connected
                     && self.wheel.is_none()
@@ -351,6 +419,9 @@ impl ApplicationHandler<AppEvent> for App {
             }
             WindowEvent::CursorLeft { .. } => {
                 self.cancel_touch();
+                self.home_armed = false;
+                self.pointer = PhysicalPosition::new(-1.0, -1.0);
+                self.update_home_visual();
             }
             WindowEvent::MouseInput {
                 state,
@@ -360,7 +431,8 @@ impl ApplicationHandler<AppEvent> for App {
                 let position = self
                     .position(false)
                     .and_then(|(x, y)| normalized_position(x, y, 0));
-                self.mouse_button(state == ElementState::Pressed, position);
+                self.pointer_button(state == ElementState::Pressed, self.home_hit(), position);
+                self.update_home_visual();
             }
             WindowEvent::MouseWheel { delta, .. } if self.focused && self.connected => {
                 let lines = match delta {
@@ -490,6 +562,68 @@ mod tests {
         app.advance_scroll(now);
         now
     }
+    #[test]
+    fn home_button_click_sends_a_complete_home_tap_without_touch() {
+        let mut app = app();
+        app.pointer_button(true, true, None);
+        assert!(events(&app).is_empty());
+        app.pointer_button(false, true, None);
+        assert_eq!(
+            events(&app),
+            [
+                HidEvent::Home { pressed: true },
+                HidEvent::Home { pressed: false }
+            ]
+        );
+    }
+
+    #[test]
+    fn home_button_cancels_on_release_outside_or_focus_loss() {
+        let mut app = app();
+        app.pointer_button(true, true, None);
+        app.pointer_button(false, false, None);
+        assert!(events(&app).is_empty());
+        app.pointer_button(true, true, None);
+        app.release();
+        app.pointer_button(false, true, None);
+        assert!(events(&app).is_empty());
+    }
+
+    #[test]
+    fn drag_ending_on_home_does_not_activate_it() {
+        let mut app = app();
+        app.pointer_button(true, false, Some((1000, 2000)));
+        app.pointer_button(false, true, None);
+        let events = events(&app);
+        assert_eq!(events.len(), 2);
+        assert!(
+            events
+                .iter()
+                .all(|event| matches!(event, HidEvent::Touch { .. }))
+        );
+    }
+
+    #[test]
+    fn home_button_interrupts_wheel_and_preserves_held_f1() {
+        let mut app = app();
+        begin_wheel(&mut app);
+        events(&app);
+        app.pointer_button(true, true, None);
+        assert!(matches!(
+            events(&app).as_slice(),
+            [HidEvent::Touch {
+                phase: TouchPhase::End,
+                ..
+            }]
+        ));
+        app.key(KeyCode::F1, true);
+        events(&app);
+        app.pointer_button(false, true, None);
+        assert!(events(&app).is_empty());
+        app.key(KeyCode::F1, false);
+        assert_eq!(events(&app), [HidEvent::Home { pressed: false }]);
+    }
+
     #[test]
     fn hardware_keys_have_stable_hid_usages() {
         assert_eq!(hid_usage(KeyCode::KeyA), Some(4));

@@ -63,10 +63,13 @@ sent only after this process has successfully started its stream.
 | Left click and drag | Single-finger touch and drag |
 | Vertical mouse wheel | A short vertical swipe at the pointer position |
 | Keyboard | ASCII text keys, modifiers and navigation keys over HID |
-| F1 | Home button |
+| House button below the screen, or F1 | Home button |
 | F2 | Spotlight shortcut, Command+Space |
 
-The window must be focused. Clicks in the black margins do not start touches.
+The window must be focused. The house button activates on click release; moving
+outside it before releasing cancels the click. The video keeps its aspect ratio
+and has rounded screen corners. Clicks in clipped corners, margins or the
+control strip do not start phone touches.
 Leaving the window ends a drag; losing focus releases held input. ASCII typing
 follows the host logical character, including shifted punctuation, while
 modifier and key-release state remains tied to physical keys. Unicode/IME

@@ -13,7 +13,8 @@ source because `idevice`'s native CoreDevice APIs are pinned to a Git revision.
 | `src/session.rs` | Service lifecycle, ordered encoded handoff, decoder worker, input dispatch |
 | `src/video/decoder.rs` | FFmpeg packet pool, hardware selection, decoded-frame transfer and buffer reuse |
 | `src/video/frame.rs` | Recyclable decoded planes and one-frame presentation mailbox |
-| `src/video/renderer.rs` | wgpu YUV textures, aspect-preserving rendering and surface presentation |
+| `src/video/renderer.rs` | wgpu YUV textures, rounded screen and Home button rendering, surface presentation |
+| `src/video/layout.rs` | Shared DPI-aware screen/button geometry and pointer hit testing |
 | `src/input.rs` | HID encoding, contact/key state and bounded input queue |
 | `src/app.rs` | winit window events, coordinate mapping and controls |
 | `src/metrics.rs` | Fixed-size counters, timing histograms and optional synthetic timestamp recognition |
@@ -36,7 +37,9 @@ cargo build --release --locked
 
 The normal suite includes RTP loss/order cases, HID transitions, pairing
 validation, immediate HEVC output from complete synthetic access units, decoded
-storage recycling, histogram boundaries and WGSL validation. It does not require
+storage recycling, histogram boundaries and WGSL validation. Home button tests cover click cancellation, interrupted
+scrolling and F1 ownership; layout tests check rounded corners, touch mapping and
+DPI scaling. It does not require
 a connected iPhone.
 
 Probe local decoder hardware explicitly:
