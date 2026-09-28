@@ -1,7 +1,8 @@
 //! Fixed-size counters. Frame contents and input values never enter tracing.
+use crate::video::DecodedFrame;
 use std::array;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const BUCKETS: usize = 256;
 
@@ -58,6 +59,7 @@ impl Histogram {
 
 #[derive(Default)]
 pub struct Metrics {
+    pub measure_stamp: AtomicBool,
     pub packets: AtomicU64,
     pub bytes: AtomicU64,
     pub access_units: AtomicU64,
@@ -66,9 +68,49 @@ pub struct Metrics {
     pub submitted: AtomicU64,
     pub decode: Histogram,
     pub receive_to_submit: Histogram,
+    pub source_to_submit: Histogram,
+    stamp_y: AtomicU64,
 }
 
 impl Metrics {
+    /// Optional synthetic-page timing probe. It never saves pixels or text.
+    /// Green/32 binary cells/magenta must span the whole encoded picture.
+    pub fn record_source_stamp(&self, frame: &DecodedFrame) {
+        if !self.measure_stamp.load(Ordering::Relaxed) || frame.width < 34 {
+            return;
+        }
+        let x = |column: u32| ((u64::from(frame.width) * u64::from(2 * column + 1)) / 68) as u32;
+        let markers = |y| {
+            matches!((frame.rgb_at(x(0),y), frame.rgb_at(x(33),y)),
+                (Some([r,g,b]),Some([rr,gg,bb])) if r<100 && g>150 && b<100 && rr>170 && gg<100 && bb>170)
+        };
+        let cached = self.stamp_y.load(Ordering::Relaxed) as u32;
+        let y = if cached < frame.height && markers(cached) {
+            Some(cached)
+        } else {
+            (0..frame.height).step_by(4).find(|&y| markers(y))
+        };
+        let Some(y) = y else {
+            return;
+        };
+        self.stamp_y.store(u64::from(y), Ordering::Relaxed);
+        let mut value = 0_u32;
+        for column in 1..33 {
+            let Some(luma) = frame.luma_at(x(column), y) else {
+                return;
+            };
+            value = (value << 1) | u32::from(luma > 128);
+        }
+        let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+            return;
+        };
+        let age = (now.as_millis() as u32).wrapping_sub(value);
+        if age <= 5000 {
+            self.source_to_submit
+                .record(Duration::from_millis(u64::from(age)));
+        }
+    }
+
     pub fn report(&self) {
         tracing::info!(
             packets = self.packets.load(Ordering::Relaxed),
@@ -82,6 +124,10 @@ impl Metrics {
             receive_to_submit_p50_ms = self.receive_to_submit.percentile_ms(50),
             receive_to_submit_p95_ms = self.receive_to_submit.percentile_ms(95),
             receive_to_submit_p99_ms = self.receive_to_submit.percentile_ms(99),
+            stamp_samples = self.source_to_submit.count.load(Ordering::Relaxed),
+            source_to_submit_mean_ms = self.source_to_submit.mean_ms(),
+            source_to_submit_p50_ms = self.source_to_submit.percentile_ms(50),
+            source_to_submit_p95_ms = self.source_to_submit.percentile_ms(95),
             "pipeline counters; submission is not display scanout"
         );
     }

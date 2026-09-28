@@ -4,7 +4,7 @@ mod pairing;
 
 use anyhow::{Context, Result, bail};
 use idevice::{
-    IdeviceService, ReadWrite, RemoteXpcClient, RsdService,
+    IdeviceService, ReadWrite, RemoteXpcClient,
     core_device::{
         ButtonState, IndigoHidClient, MainKeyboardService, UniversalHidServiceClient,
         build_start_video_parameters,
@@ -193,6 +193,20 @@ impl DeviceSession {
         .await
         .context("video negotiation timed out")??;
         self.streaming = true;
+        if let Some(id) = answer
+            .as_dictionary()
+            .and_then(|d| d.get("connection"))
+            .and_then(plist::Value::as_dictionary)
+            .and_then(|d| d.get("options"))
+            .and_then(plist::Value::as_dictionary)
+            .and_then(|d| d.get("avcMediaStreamOptionClientSessionID"))
+            .and_then(plist::Value::as_dictionary)
+            .and_then(|d| d.get("uuid"))
+            .and_then(plist::Value::as_string)
+        {
+            self.session_id =
+                uuid::Uuid::parse_str(id).context("invalid negotiated session identifier")?;
+        }
         let config = answer
             .as_dictionary()
             .and_then(|d| d.get("connection"))
@@ -216,16 +230,13 @@ impl DeviceSession {
     }
 
     pub async fn open_input(&mut self) -> Result<HidChannels> {
-        let mut universal = timeout(
-            CONNECT_TIMEOUT,
-            UniversalHidServiceClient::connect_rsd(&mut self.adapter, &mut self.handshake),
-        )
-        .await??;
-        let indigo = timeout(
-            CONNECT_TIMEOUT,
-            IndigoHidClient::connect_rsd(&mut self.adapter, &mut self.handshake),
-        )
-        .await??;
+        // Build concrete clients rather than the generic RsdService async default:
+        // its boxed transport lifetime prevents the resulting future being Send.
+        let mut universal = UniversalHidServiceClient::new(
+            self.open_xpc("com.apple.coredevice.hid.universalhidservice")
+                .await?,
+        );
+        let indigo = IndigoHidClient::new(self.open_xpc("com.apple.coredevice.hid.indigo").await?);
         let keyboard = timeout(CONNECT_TIMEOUT, universal.create_main_keyboard()).await??;
         Ok(HidChannels {
             universal,
@@ -234,6 +245,23 @@ impl DeviceSession {
             touch: None,
             home_pressed: false,
         })
+    }
+
+    async fn open_xpc(&mut self, service: &str) -> Result<Xpc> {
+        let port = self
+            .handshake
+            .services
+            .get(service)
+            .context("required input service is absent")?
+            .port;
+        timeout(CONNECT_TIMEOUT, async {
+            let socket: Box<dyn ReadWrite> = Box::new(self.adapter.connect(port).await?);
+            let mut client = RemoteXpcClient::new(socket).await?;
+            client.do_handshake().await?;
+            Ok::<_, anyhow::Error>(client)
+        })
+        .await
+        .context("input service handshake timed out")?
     }
 
     pub async fn stop(&mut self) -> Result<()> {
@@ -411,14 +439,86 @@ async fn invoke(
     request.insert("CoreDevice.input".into(), XPCObject::Dictionary(input));
     client.send_object(request, true).await?;
     let response = client.recv().await?;
+    parse_response(response, feature, action)
+}
+
+fn parse_response(response: plist::Value, feature: &str, action: &str) -> Result<plist::Value> {
     let dict = response
         .as_dictionary()
         .context("invalid CoreDevice reply")?;
+    // Error precedence is deliberate: never turn an explicit device rejection
+    // into success because it also contains an output or is a stop request.
+    if dict.contains_key("CoreDevice.error") {
+        bail!("CoreDevice rejected {action}");
+    }
     if let Some(output) = dict.get("CoreDevice.output") {
         return Ok(output.clone());
     }
+    if feature == "stopmediastream" && action == "mediastreamstop" {
+        tracing::debug!("device acknowledged stream stop without an output payload");
+        return Ok(plist::Value::Dictionary(plist::Dictionary::new()));
+    }
     // Device errors can embed names and identifiers; retain only the action here.
-    bail!("CoreDevice rejected {action} (no output returned)")
+    bail!("CoreDevice {action} returned no output")
+}
+
+#[cfg(test)]
+mod response_tests {
+    use super::parse_response;
+    use anyhow::{Context, Result};
+
+    #[test]
+    fn stop_accepts_empty_acknowledgement() -> Result<()> {
+        parse_response(
+            plist::Value::Dictionary(plist::Dictionary::new()),
+            "stopmediastream",
+            "mediastreamstop",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn start_still_requires_output() {
+        assert!(
+            parse_response(
+                plist::Value::Dictionary(plist::Dictionary::new()),
+                "startmediastream",
+                "mediastreamstart"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn stop_never_hides_device_error_or_leaks_payload() -> Result<()> {
+        let mut reply = plist::Dictionary::new();
+        reply.insert("CoreDevice.error".into(), "private device details".into());
+        reply.insert(
+            "CoreDevice.output".into(),
+            plist::Value::Dictionary(plist::Dictionary::new()),
+        );
+        let error = parse_response(
+            plist::Value::Dictionary(reply),
+            "stopmediastream",
+            "mediastreamstop",
+        )
+        .err()
+        .context("explicit device error must fail")?;
+        assert_eq!(error.to_string(), "CoreDevice rejected mediastreamstop");
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_stop_reply_is_not_an_acknowledgement() {
+        assert!(
+            parse_response(
+                plist::Value::String("unexpected".into()),
+                "stopmediastream",
+                "mediastreamstop"
+            )
+            .is_err()
+        );
+    }
 }
 
 async fn connect_usb(serial: Option<&str>) -> Result<(AdapterHandle, u16)> {
@@ -448,16 +548,23 @@ async fn connect_wifi(
     let stream = TcpStream::connect(address).await?;
     stream.set_nodelay(true)?;
     let mut rpc = RemotePairingClient::new(RpPairingSocket::new(stream), "iphone-mirror-rs");
-    rpc.attempt_pair_verify().await?;
+    rpc.attempt_pair_verify()
+        .await
+        .map_err(|_| anyhow::anyhow!("Wi-Fi pair-verify handshake failed"))?;
     rpc.validate_pairing(record)
         .await
-        .context("saved CoreDevice pairing was rejected")?;
-    let port = rpc.create_tcp_listener().await?;
+        .map_err(|_| anyhow::anyhow!("saved CoreDevice pairing was rejected"))?;
+    let port = rpc
+        .create_tcp_listener()
+        .await
+        .map_err(|_| anyhow::anyhow!("device refused native tunnel listener"))?;
     let mut tunnel_address = address;
     tunnel_address.set_port(port);
     let stream = TcpStream::connect(tunnel_address).await?;
     stream.set_nodelay(true)?;
-    let tunnel = connect_tls_psk_tunnel_native(stream, rpc.encryption_key()).await?;
+    let tunnel = connect_tls_psk_tunnel_native(stream, rpc.encryption_key())
+        .await
+        .map_err(|_| anyhow::anyhow!("native TLS-PSK tunnel handshake failed"))?;
     let rsd_port = tunnel.info.server_rsd_port;
     let host = tunnel.info.client_address.parse()?;
     let peer = tunnel.info.server_address.parse()?;
