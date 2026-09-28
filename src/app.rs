@@ -3,7 +3,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use iphone_mirror_rs::input::{
-    HidEvent, InputState, TouchPhase, TouchSample, normalized_position, wheel_gesture,
+    HidEvent, InputState, TouchPhase, TouchSample, ascii_usage, normalized_position, wheel_gesture,
 };
 use iphone_mirror_rs::metrics::Metrics;
 use iphone_mirror_rs::video::{DecodedFrame, LatestFrame, Renderer};
@@ -12,7 +12,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
-use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::keyboard::{Key, KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use crate::session::InputBus;
@@ -33,7 +33,8 @@ pub struct App {
     metrics: Arc<Metrics>,
     stop: watch::Sender<bool>,
     controls: InputState,
-    physical_keys: [bool; 240],
+    held_usages: [u8; 240],
+    key_chords: [Option<(u8, bool)>; 240],
     spotlight: bool,
     mouse_down: bool,
     pointer: PhysicalPosition<f64>,
@@ -61,7 +62,8 @@ impl App {
             metrics,
             stop,
             controls: InputState::default(),
-            physical_keys: [false; 240],
+            held_usages: [0; 240],
+            key_chords: [None; 240],
             spotlight: false,
             mouse_down: false,
             pointer: PhysicalPosition::new(0.0, 0.0),
@@ -91,7 +93,8 @@ impl App {
         self.wheel = None;
         self.pending_scroll = 0.0;
         self.mouse_down = false;
-        self.physical_keys.fill(false);
+        self.held_usages.fill(0);
+        self.key_chords.fill(None);
         self.spotlight = false;
         for event in self.controls.release_all(self.timestamp()) {
             self.send(event);
@@ -133,7 +136,24 @@ impl App {
         self.pending_scroll = 0.0;
     }
 
+    #[cfg(test)]
     fn key(&mut self, code: KeyCode, pressed: bool) {
+        self.key_event(code, pressed, None);
+    }
+
+    fn update_usage(&mut self, usage: u8, pressed: bool, timestamp: u64) {
+        let count = &mut self.held_usages[usage as usize];
+        if pressed {
+            *count = count.saturating_add(1);
+        } else {
+            *count = count.saturating_sub(1);
+        }
+        let held = *count != 0 || self.spotlight && matches!(usage, 227 | 44);
+        let event = self.controls.set_key(usage, held, timestamp);
+        self.send(event);
+    }
+
+    fn key_event(&mut self, code: KeyCode, pressed: bool, character: Option<char>) {
         let timestamp = self.timestamp();
         if code == KeyCode::F1 {
             let event = self.controls.home(pressed);
@@ -142,15 +162,32 @@ impl App {
             // Spotlight is the standard iOS Command+Space shortcut.
             self.spotlight = pressed;
             for usage in if pressed { [227, 44] } else { [44, 227] } {
-                let held = pressed || self.physical_keys[usage as usize];
+                let held = pressed || self.held_usages[usage as usize] != 0;
                 let event = self.controls.set_key(usage, held, timestamp);
                 self.send(event);
             }
-        } else if let Some(usage) = hid_usage(code) {
-            self.physical_keys[usage as usize] = pressed;
-            let held = pressed || self.spotlight && matches!(usage, 227 | 44);
-            let event = self.controls.set_key(usage, held, timestamp);
-            self.send(event);
+        } else if let Some(source) = hid_usage(code) {
+            if pressed {
+                if self.key_chords[source as usize].is_some() {
+                    return;
+                }
+                // A compositor can provide ':' with a virtual keymap and no
+                // physical Shift event. Keep that implicit modifier attached to
+                // this key until release, independently of other held keys.
+                let chord = character.and_then(ascii_usage).unwrap_or((source, false));
+                self.key_chords[source as usize] = Some(chord);
+                if chord.1 {
+                    self.update_usage(225, true, timestamp);
+                }
+                self.update_usage(chord.0, true, timestamp);
+            } else if let Some(chord) = self.key_chords[source as usize].take() {
+                // Release uses the press-time mapping even if the layout or
+                // modifiers changed while the physical key was held.
+                self.update_usage(chord.0, false, timestamp);
+                if chord.1 {
+                    self.update_usage(225, false, timestamp);
+                }
+            }
         }
     }
 
@@ -337,7 +374,15 @@ impl ApplicationHandler<AppEvent> for App {
                 if self.focused && self.connected && !event.repeat =>
             {
                 if let PhysicalKey::Code(code) = event.physical_key {
-                    self.key(code, event.state.is_pressed());
+                    let character = match &event.logical_key {
+                        Key::Character(text) => {
+                            let mut chars = text.chars();
+                            let first = chars.next();
+                            if chars.next().is_none() { first } else { None }
+                        }
+                        _ => None,
+                    };
+                    self.key_event(code, event.state.is_pressed(), character);
                 }
             }
             _ => {}
@@ -569,5 +614,46 @@ mod tests {
         assert_eq!(&release[4..8], &contact[4..8]);
         assert!(app.controls.touch_end(0).is_none());
         assert!(app.wheel.is_none());
+    }
+
+    #[test]
+    fn virtual_colon_gets_implicit_shift_and_releases_press_time_chord() {
+        let mut app = app();
+        app.key_event(KeyCode::Semicolon, true, Some(':'));
+        let pressed = events(&app);
+        let Some(HidEvent::Keyboard(report)) = pressed.last() else {
+            panic!("keyboard press");
+        };
+        assert_ne!(report[1 + 51 / 8] & (1 << (51 % 8)), 0);
+        assert_ne!(report[1 + 225 / 8] & (1 << (225 % 8)), 0);
+        // Release event may carry the unshifted logical key after layout changes.
+        app.key_event(KeyCode::Semicolon, false, Some(';'));
+        let released = events(&app);
+        let Some(HidEvent::Keyboard(report)) = released.last() else {
+            panic!("keyboard release");
+        };
+        assert!(report[1..31].iter().all(|&byte| byte == 0));
+    }
+
+    #[test]
+    fn implicit_shift_does_not_release_physical_shift_or_other_implicit_owner() {
+        let mut app = app();
+        app.key(KeyCode::ShiftLeft, true);
+        app.key_event(KeyCode::Semicolon, true, Some(':'));
+        app.key_event(KeyCode::Digit1, true, Some('!'));
+        events(&app);
+        app.key_event(KeyCode::Semicolon, false, None);
+        app.key(KeyCode::ShiftLeft, false);
+        let released = events(&app);
+        let Some(HidEvent::Keyboard(report)) = released.last() else {
+            panic!("keyboard release");
+        };
+        assert_ne!(report[1 + 225 / 8] & (1 << (225 % 8)), 0);
+        app.key_event(KeyCode::Digit1, false, None);
+        let released = events(&app);
+        let Some(HidEvent::Keyboard(report)) = released.last() else {
+            panic!("keyboard release");
+        };
+        assert!(report[1..31].iter().all(|&byte| byte == 0));
     }
 }
