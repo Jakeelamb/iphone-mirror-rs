@@ -2,7 +2,9 @@ use super::frame::{DecodedFrame, Layout, Plane, PlanePool};
 use anyhow::{Context, Result, bail, ensure};
 use ffmpeg_sys_next as av;
 use std::collections::VecDeque;
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -110,9 +112,12 @@ impl Decoder {
     }
 
     unsafe fn try_hardware(&mut self, codec: *const av::AVCodec) {
-        // Prefer VAAPI on Linux (including the integrated GPU); CUDA is a
-        // fallback. Never require a particular render node or vendor device.
+        // Prefer direct Mesa AMD VAAPI over the NVIDIA VAAPI/CUDA bridge on
+        // hybrid systems. The latter can silently win through a process-wide
+        // LIBVA_DRIVER_NAME override even when rendering uses the integrated GPU.
+        // Fall back to normal driver selection, then CUDA, then software.
         unsafe {
+            let preferred = amd_render_nodes(Path::new("/sys/class/drm"), Path::new("/dev/dri"));
             for kind in [
                 av::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,
                 av::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA,
@@ -131,16 +136,28 @@ impl Decoder {
                         continue;
                     }
                     let mut device = ptr::null_mut();
-                    let result = av::av_hwdevice_ctx_create(
-                        &mut device,
-                        kind,
-                        ptr::null(),
-                        ptr::null_mut(),
-                        0,
-                    );
-                    if result < 0 {
-                        tracing::debug!(?kind, error = %av_error(result), "hardware decoder unavailable");
-                        continue;
+                    if kind == av::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI {
+                        for node in &preferred {
+                            match create_hardware_device(kind, Some(node)) {
+                                Ok(candidate) => {
+                                    device = candidate;
+                                    tracing::info!(device = %node.display(), driver = "radeonsi",
+                                        "selected direct AMD VAAPI decoding");
+                                    break;
+                                }
+                                Err(error) => tracing::debug!(device = %node.display(), %error,
+                                    "preferred VAAPI device unavailable"),
+                            }
+                        }
+                    }
+                    if device.is_null() {
+                        match create_hardware_device(kind, None) {
+                            Ok(candidate) => device = candidate,
+                            Err(error) => {
+                                tracing::debug!(?kind, %error, "hardware decoder unavailable");
+                                continue;
+                            }
+                        }
                     }
                     *self.hardware_format = (*config).pix_fmt;
                     (*self.context).hw_device_ctx = device;
@@ -352,6 +369,69 @@ impl Decoder {
     }
 }
 
+fn amd_render_nodes(sysfs: &Path, devices: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(sysfs) else {
+        return Vec::new();
+    };
+    let mut nodes = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name_text) = name.to_str() else {
+            continue;
+        };
+        let Some(number) = name_text.strip_prefix("renderD") else {
+            continue;
+        };
+        if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+            continue;
+        }
+        if std::fs::read_to_string(entry.path().join("device/vendor"))
+            .is_ok_and(|vendor| vendor.trim() == "0x1002")
+        {
+            nodes.push(devices.join(name));
+        }
+    }
+    nodes.sort();
+    nodes
+}
+
+unsafe fn create_hardware_device(
+    kind: av::AVHWDeviceType,
+    amd_node: Option<&Path>,
+) -> Result<*mut av::AVBufferRef> {
+    // SAFETY: Strings and option dictionary remain live throughout FFmpeg's
+    // synchronous initialization. FFmpeg owns the returned reference; the codec
+    // receives ownership on success. No process-wide environment is mutated.
+    unsafe {
+        let node = amd_node
+            .map(|path| CString::new(path.as_os_str().as_bytes()))
+            .transpose()
+            .context("invalid VAAPI device path")?;
+        let mut options = ptr::null_mut();
+        if node.is_some() {
+            let result = av::av_dict_set(&mut options, c"driver".as_ptr(), c"radeonsi".as_ptr(), 0);
+            if result < 0 {
+                av::av_dict_free(&mut options);
+                check(result).context("set VAAPI driver")?;
+            }
+        }
+        let mut device = ptr::null_mut();
+        let result = av::av_hwdevice_ctx_create(
+            &mut device,
+            kind,
+            node.as_ref().map_or(ptr::null(), |node| node.as_ptr()),
+            options,
+            0,
+        );
+        av::av_dict_free(&mut options);
+        if result < 0 {
+            av::av_buffer_unref(&mut device);
+            check(result).context("initialize hardware device")?;
+        }
+        Ok(device)
+    }
+}
+
 unsafe fn copy_plane(
     source: *const av::AVFrame,
     index: usize,
@@ -415,6 +495,37 @@ impl Drop for Decoder {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn amd_node_discovery_filters_vendor_and_ignores_non_render_entries() -> Result<()> {
+        let path = std::env::temp_dir().join(format!(
+            "mirror-vaapi-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&path)?;
+        let result = (|| -> Result<()> {
+            for (name, vendor) in [
+                ("renderD128", "0x10de\n"),
+                ("renderD129", "0x1002\n"),
+                ("card2", "0x1002\n"),
+                ("renderDinvalid", "0x1002\n"),
+            ] {
+                std::fs::create_dir_all(path.join(name).join("device"))?;
+                std::fs::write(path.join(name).join("device/vendor"), vendor)?;
+            }
+            assert_eq!(
+                amd_render_nodes(&path, Path::new("/dev/dri")),
+                vec![PathBuf::from("/dev/dri/renderD129")]
+            );
+            assert!(amd_render_nodes(&path.join("missing"), Path::new("/dev/dri")).is_empty());
+            Ok(())
+        })();
+        std::fs::remove_dir_all(&path)?;
+        result
+    }
 
     fn access_units() -> Vec<&'static [u8]> {
         split_units(include_bytes!("fixtures/motion-64x96.hevc"))
