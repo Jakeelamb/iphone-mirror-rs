@@ -7,12 +7,32 @@ frame rate does not by itself establish low end-to-end latency.
 
 ## Current evidence
 
-The initial native Wi-Fi GUI run on an iPhone 15/iOS 27 negotiated 1184×2576
-HEVC, reported actual VAAPI output, and rendered with the AMD Radeon 890M Vulkan
-adapter. Its trace showed sustained decoding and presentation. That initial run
-ended with a `mediastreamstop` response error, so it is evidence for the media
-path rather than a clean-shutdown qualification. Later bounded runs should
-report their own exit status.
+Release validation on 2026-09-27 (Pacific), using an iPhone 15/iOS 27,
+1184×2576 HEVC, direct CUDA/NVDEC, AMD Radeon 890M Vulkan rendering and Immediate
+presentation on the physical Hyprland desktop:
+
+| Measurement | Result |
+| --- | --- |
+| Run duration | 45 seconds including automatic Wi-Fi discovery; exit 0 |
+| Decoded / submitted frames | 2,355 / 2,355, approximately 60 FPS while streaming |
+| Decode mean | 2.58 ms |
+| Last-packet receipt to submission | Mean 3.51 ms; p50 ≤4 ms, p95 ≤6 ms, p99 ≤10 ms |
+| Synthetic source to submission | Mean 59.17 ms; p50 ≤59 ms, p95 ≤63 ms; 2,355 samples |
+| Source clock calibration | Fresh RTT 10 ms, approximate midpoint uncertainty ±5 ms; recalibrated every 30 s |
+| Process CPU | 0.129 cores averaged over the last 30.04 seconds |
+| Process resident memory | Mean 301.19 MiB, peak 301.73 MiB in that interval |
+
+Resource sampling reads `/proc/PID/stat` every 250 ms and discards the first
+15 seconds for discovery/warmup. Timing counters include startup. These figures
+come from the installed 11 MiB binary in an uninstrumented release run with the optional synthetic timestamp
+probe; CPU sampling and allocation tracing run separately. They do not establish
+imperceptible latency or click-to-photon latency.
+
+Formatting, all-target Clippy, 49 normal tests, and explicit hardware image
+comparisons passed. Two consecutive short sessions confirmed clean stop and reconnect. A separate
+90-second isolated GUI run confirmed tap, wheel, Home, Spotlight, keyboard URL
+entry including colons, successful navigation and clean shutdown. USB and
+landscape input have not been live-qualified in the Rust application.
 
 Separately, synthetic hardware-decoded pictures matched software luma exactly.
 The isolated surface fixture matched an independent FFmpeg BT709 RGB reference
@@ -24,6 +44,46 @@ checks, not physical GPU timing results.
 There is no matched before/after performance result against the Python reference
 yet. CPU percentages or exploratory profiles collected with different motion,
 renderers or profiling overhead must not be presented as a speedup.
+
+## Decoder comparison and profile-driven change
+
+One 45-second release run per backend used the same phone, scrolling page,
+physical AMD renderer and sampling method (last 30 seconds for CPU/RSS):
+
+| Decoder path | Decode mean | Receipt→submit mean | CPU cores | Mean RSS |
+| --- | ---: | ---: | ---: | ---: |
+| System VAAPI through NVIDIA bridge | 2.91 ms | 3.97 ms | 0.146 | 324.64 MiB |
+| Direct AMD VAAPI | 6.42 ms | 7.38 ms | 0.221 | 196.23 MiB |
+| Direct CUDA/NVDEC | 2.60 ms | 3.80 ms | 0.128 | 305.71 MiB |
+
+All three sustained approximately 60 FPS and exited successfully. These are
+individual observations, not confidence intervals or a universal GPU ranking.
+Direct CUDA became the default because it reduced local decode time, CPU and
+resident memory on this host. AMD remains selectable for its lower memory use.
+Source timestamp ages from these sequential experiments are not used to rank
+backends: clock calibration age and startup conditions differed.
+
+A separate CPU profile collected 928 user-cycle samples after a five-second
+delay, with no lost samples. Memory-copy routines and GPU-driver calls dominated
+the visible leaves. Disassembly showed the sampled glibc copy/clear routines
+already used AVX512; incomplete driver call-chain unwinding prevents attributing
+every copy to a specific application stage. Hand-written assembly was not added.
+
+Full heaptrack instrumentation exceeded the bounded decoder startup deadline
+and ended after seven frames, so that capture is **not** a steady-workload
+allocation result. Sampled jemalloc profiling then completed two 25-second
+live phone-video runs: 1,441 decoded frames with NVIDIA VAAPI and 1,446 with
+CUDA. They started from the scrolling workload, but did not collect per-frame
+marker validation, so exact app content throughout those runs is unverified.
+The VAAPI profile identified 1,440 allocations totalling approximately
+7.55 GB at `nvCreateImage` beneath `av_hwframe_transfer_data`, roughly 5 MiB per
+frame. Disassembly confirmed the driver allocation call. The CUDA profile
+contains neither the bridge library nor that stack: direct decoding removes
+this specific allocation path. It does not make all drivers or rendering
+allocation-free. Other large sampled stacks could not be attributed reliably
+because their modules were unloaded; no total allocation-reduction percentage
+is claimed. Sampling changes the allocator and adds overhead, so those runs are
+not the latency benchmark.
 
 ## Repeatable scrolling workload
 
@@ -56,7 +116,9 @@ encoded picture; browser zoom, rotation, hidden content or interrupted sync can
 make recognition fail. The probe accepts only recognizable markers with an age
 between zero and five seconds. Always report `stamp_samples`, including zero or
 missing samples, alongside any latency statistic. The clock offset is refreshed
-when the page becomes visible again, not continuously during a long run.
+every 30 seconds and when the page becomes visible again. Overlapping refreshes
+are suppressed; a failed refresh retains the last estimate and displays a
+warning. Start qualified timing runs only after a successful calibration.
 
 ## What the counters measure
 
@@ -99,9 +161,23 @@ perf record -F 199 --call-graph dwarf -o profiles/cpu.data -- \
   ./target/release/iphone-mirror-rs --connection wifi --duration 60
 perf report -i profiles/cpu.data
 
-heaptrack -o profiles/heaptrack -- \
+heaptrack -o profiles/heaptrack \
   ./target/release/iphone-mirror-rs --connection wifi --duration 30
 ```
+
+For lower-overhead allocation sampling when jemalloc profiling is installed:
+
+```sh
+env LD_PRELOAD=/usr/lib/libjemalloc.so.2 \
+  MALLOC_CONF=prof:true,prof_accum:true,prof_final:true,lg_prof_sample:18,prof_prefix:profiles/alloc \
+  ./target/release/iphone-mirror-rs --connection wifi --duration 25
+jeprof --text --alloc_space ./target/release/iphone-mirror-rs profiles/alloc.PID.0.f.heap
+```
+
+Retain the exact executable with each profile for symbolization. The sampled
+allocation totals represent requested allocation traffic, not live memory or
+GPU memory. Driver symbols can be missing or misleading; inspect mappings and
+call sites before assigning a hotspot to a function.
 
 Profiler access depends on the host. Preserve any permission failure as a
 limitation rather than changing system-wide security settings. Heap tracing

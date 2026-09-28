@@ -12,11 +12,11 @@ speedup over the reference application has not been established.
 
 ## Build and run
 
-Requirements: a current stable Rust toolchain, `pkg-config`, Clang/libclang,
+Requirements: Rust 1.96 or newer, `pkg-config`, Clang/libclang,
 FFmpeg development libraries (`libavcodec` and `libavutil`), and a Vulkan driver.
 USB discovery additionally needs `usbmuxd`. The tested system uses FFmpeg 9.0.1;
 the build generates bindings against the installed headers. The tested Rust
-compiler is 1.96.0; a minimum supported Rust version has not been qualified.
+compiler is 1.96.0.
 
 The iPhone must already be paired, unlocked, and have Developer Mode enabled and
 its developer services available. The tested remote-control service requires
@@ -28,6 +28,13 @@ cargo build --release --locked
 ./target/release/iphone-mirror-rs --connection wifi
 ```
 
+Optional installation (the profiling build remains in `target/release`):
+
+```sh
+install -Dm755 -s target/release/iphone-mirror-rs ~/.local/bin/iphone-mirror-rs
+iphone-mirror-rs --connection wifi
+```
+
 Wi-Fi uses the existing CoreDevice pairing under
 `$XDG_DATA_HOME/pymobiledevice3`, defaulting to
 `~/.local/share/pymobiledevice3`. Keep the phone on the same reachable local
@@ -36,6 +43,7 @@ devices, select `--serial ID` or `--pairing-file PATH`.
 
 ```sh
 ./target/release/iphone-mirror-rs --connection usb
+./target/release/iphone-mirror-rs --decoder vaapi --connection wifi
 ./target/release/iphone-mirror-rs --software --connection wifi
 ./target/release/iphone-mirror-rs --headless --duration 30 --connection wifi
 ./target/release/iphone-mirror-rs --help
@@ -44,7 +52,9 @@ devices, select `--serial ID` or `--pairing-file PATH`.
 The default connection mode is `auto`: try USB, then Wi-Fi. `--address IP:PORT`
 selects a Wi-Fi remote-pairing endpoint explicitly. Only one instance runs at a
 time. Close the window or use Ctrl+C to end the session. `--duration SECONDS`
-limits total run time, including connection setup.
+limits total run time, including connection setup. Use one mirroring controller
+at a time: iOS 27 shutdown uses the native device-wide `stopAll` media request,
+sent only after this process has successfully started its stream.
 
 ## Controls
 
@@ -61,7 +71,8 @@ Leaving the window ends a drag; losing focus releases held input. ASCII typing
 follows the host logical character, including shifted punctuation, while
 modifier and key-release state remains tied to physical keys. Unicode/IME
 composition, custom game keymaps, simultaneous touch contacts, clipboard text
-injection and audio are not implemented.
+injection and audio are not implemented. Live input verification currently covers portrait orientation;
+automatic orientation tracking is not implemented.
 
 ## Architecture and development
 
@@ -71,7 +82,10 @@ order in a bounded handoff. The presentation mailbox holds only the newest
 complete decoded picture. Compressed packet buffers, decoded planes and GPU
 textures are reused.
 
-Hardware decoding prefers VAAPI, then CUDA, with software fallback. The current
+Hardware decoding defaults to direct CUDA/NVDEC, then VAAPI, with software
+fallback. `--decoder cuda|vaapi|software|auto` selects a preference; `vaapi` tries
+a direct AMD render node first when available. This overrides the VAAPI driver
+for that device only and does not change system settings. The current
 hardware path downloads decoded frames to reusable CPU buffers and uploads YUV
 planes to wgpu; it is **not zero-copy**. The renderer supports 8-bit YUV420P and
 NV12 and selects Immediate, Mailbox, then FIFO presentation according to surface
