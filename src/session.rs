@@ -155,22 +155,18 @@ pub async fn run(
         tokio::time::timeout(Duration::from_secs(35), DeviceSession::connect(&options))
             .await
             .context("device connection deadline exceeded")??;
-    // Connect/register HID before starting the producer. Event delivery needs
-    // an active media stream, but these control-plane handshakes do not send
-    // events and must not let video accumulate while they complete.
-    let mut hid = match session.open_input().await {
-        Ok(hid) => hid,
+    // Keep the verified protocol order: iOS 27 rejected media startup with
+    // error 9022 when HID was registered first. Register only after streaming.
+    let stream = match session.start_video().await {
+        Ok(stream) => stream,
         Err(error) => {
             let _ = session.stop().await;
             return Err(error);
         }
     };
-    let stream = match session.start_video().await {
-        Ok(stream) => stream,
+    let hid = match session.open_input().await {
+        Ok(hid) => hid,
         Err(error) => {
-            // Registration has already succeeded; remove the keyboard while
-            // the tunnel is still alive even when media negotiation fails.
-            let _ = tokio::time::timeout(Duration::from_secs(3), hid.close()).await;
             let _ = session.stop().await;
             return Err(error);
         }
