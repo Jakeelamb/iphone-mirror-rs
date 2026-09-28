@@ -343,4 +343,51 @@ mod tests {
         assert!(samples.windows(2).all(|s| s[1].y <= s[0].y));
         assert_eq!((samples[8].x, samples[8].y), (samples[9].x, samples[9].y));
     }
+
+    #[test]
+    fn landscape_taps_target_the_visible_quadrant_in_encoded_space() {
+        // A point toward the displayed upper-left must address different
+        // encoded quadrants for the two landscape orientations.
+        assert_eq!(normalized_position(0.25, 0.25, 90), Some((16384, 49151)));
+        assert_eq!(normalized_position(0.25, 0.25, 270), Some((49151, 16384)));
+        assert_eq!(normalized_position(0.75, 0.25, 90), Some((16384, 16384)));
+        assert_eq!(normalized_position(0.75, 0.25, 270), Some((49151, 49151)));
+    }
+
+    #[test]
+    fn wheel_follows_display_vertical_in_both_landscape_orientations() {
+        for rotation in [0, 90, 180, 270] {
+            for lines in [-2.0, 2.0] {
+                let samples = wheel_gesture(0.4, 0.5, lines, rotation).unwrap();
+                assert_eq!(samples[0].phase, TouchPhase::Begin);
+                assert_eq!(samples[9].phase, TouchPhase::End);
+                for pair in samples[..9].windows(2) {
+                    let dx = i32::from(pair[1].x) - i32::from(pair[0].x);
+                    let dy = i32::from(pair[1].y) - i32::from(pair[0].y);
+                    let sign = if lines > 0.0 { 1 } else { -1 };
+                    match rotation {
+                        0 => {
+                            assert_eq!(dx, 0);
+                            assert_eq!(dy.signum(), sign);
+                        }
+                        90 => {
+                            assert_eq!(dy, 0);
+                            assert_eq!(dx.signum(), sign);
+                        }
+                        180 => {
+                            assert_eq!(dx, 0);
+                            assert_eq!(dy.signum(), -sign);
+                        }
+                        270 => {
+                            assert_eq!(dy, 0);
+                            assert_eq!(dx.signum(), -sign);
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                // Lifting never teleports the contact at either end of a swipe.
+                assert_eq!((samples[8].x, samples[8].y), (samples[9].x, samples[9].y));
+            }
+        }
+    }
 }
