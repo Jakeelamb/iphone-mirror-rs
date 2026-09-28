@@ -111,13 +111,6 @@ impl LatestFrame {
             .unwrap_or_else(|error| error.into_inner())
             .take()
     }
-
-    pub fn pending(&self) -> bool {
-        self.frame
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .is_some()
-    }
 }
 
 #[cfg(test)]
@@ -142,9 +135,8 @@ mod tests {
         let mailbox = LatestFrame::new();
         assert!(!mailbox.publish(make_frame(2)));
         assert!(mailbox.publish(make_frame(4)));
-        assert!(mailbox.pending());
         assert_eq!(mailbox.take().map(|frame| frame.width), Some(4));
-        assert!(!mailbox.pending());
+        assert!(mailbox.take().is_none());
         assert_eq!(pool.lock().expect("pool").len(), 2);
     }
 }

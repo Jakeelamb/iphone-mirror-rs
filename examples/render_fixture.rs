@@ -18,7 +18,7 @@ struct Fixture {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     decoder: Decoder,
-    packets: Vec<&'static [u8]>,
+    picture: &'static [u8],
     frame: Option<DecodedFrame>,
     next_frame: Instant,
     count: usize,
@@ -46,10 +46,9 @@ impl Fixture {
 
     fn next(&mut self) -> Result<()> {
         // Repeat the first picture for deterministic screenshot comparison.
-        self.decoder
-            .decode(self.packets[0], Instant::now(), |frame| {
-                self.frame = Some(frame);
-            })?;
+        self.decoder.decode(self.picture, Instant::now(), |frame| {
+            self.frame = Some(frame);
+        })?;
         self.count += 1;
         if let (Some(renderer), Some(frame)) = (&mut self.renderer, &self.frame) {
             renderer.render(frame)?;
@@ -143,23 +142,25 @@ impl ApplicationHandler for Fixture {
     }
 }
 
+// The fixture has four-byte start codes and explicit access-unit delimiters.
+// Select only the first complete picture; later pictures are not replayed.
+fn first_picture(data: &[u8]) -> Result<&[u8]> {
+    let mut boundaries = data.windows(6).enumerate().filter_map(|(index, bytes)| {
+        (bytes[..4] == [0, 0, 0, 1] && bytes[4] >> 1 == 35).then_some(index)
+    });
+    let start = boundaries
+        .next()
+        .context("fixture has no access-unit delimiter")?;
+    let end = boundaries.next().unwrap_or(data.len());
+    Ok(&data[start..end])
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter("iphone_mirror_rs=info,render_fixture=info")
         .init();
     let data = include_bytes!("../src/video/fixtures/motion-256x384.hevc");
-    let mut boundaries: Vec<_> = data
-        .windows(6)
-        .enumerate()
-        .filter_map(|(index, bytes)| {
-            (bytes[..4] == [0, 0, 0, 1] && bytes[4] >> 1 == 35).then_some(index)
-        })
-        .collect();
-    boundaries.push(data.len());
-    let packets = boundaries
-        .windows(2)
-        .map(|range| &data[range[0]..range[1]])
-        .collect();
+    let picture = first_picture(data)?;
     let mut mode = DecodeMode::Software;
     let mut rotation = 0;
     let mut arguments = std::env::args().skip(1);
@@ -183,7 +184,7 @@ fn main() -> Result<()> {
         window: None,
         renderer: None,
         decoder: Decoder::new(mode)?,
-        packets,
+        picture,
         frame: None,
         next_frame: Instant::now(),
         count: 0,
@@ -200,4 +201,30 @@ fn main() -> Result<()> {
     }
     tracing::info!(frames = app.count, "synthetic fixture closed");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selected_picture_decodes_without_waiting_for_another_packet() -> Result<()> {
+        let data = include_bytes!("../src/video/fixtures/motion-256x384.hevc");
+        let picture = first_picture(data)?;
+        assert!(picture.len() < data.len());
+        let mut decoder = Decoder::new(DecodeMode::Software)?;
+        let mut count = 0;
+        decoder.decode(picture, Instant::now(), |frame| {
+            assert_eq!((frame.width, frame.height), (256, 384));
+            count += 1;
+        })?;
+        assert_eq!(count, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn missing_delimiter_is_reported_without_indexing_an_empty_list() {
+        assert!(first_picture(&[]).is_err());
+        assert!(first_picture(&[0; 16]).is_err());
+    }
 }

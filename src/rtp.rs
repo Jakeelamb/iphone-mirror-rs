@@ -323,7 +323,8 @@ impl HevcDepacketizer {
     }
 
     /// The returned slice remains valid until the next push. Consume or copy it
-    /// into the decoder before receiving another packet; no AU allocation occurs.
+    /// into the decoder before receiving another packet. The assembly buffer is
+    /// reused and grows only when its existing capacity is insufficient.
     pub fn push(&mut self, data: &[u8]) -> Result<Option<AccessUnit<'_>>, RtpError> {
         if self.clear_next {
             self.reset_unit();

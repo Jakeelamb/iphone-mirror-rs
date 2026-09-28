@@ -3,6 +3,12 @@ It contains access-unit delimiters, repeated headers, two IDRs and predicted
 pictures, with no B frames. Tests feed each complete access unit directly and
 assert that a frame is returned before the next packet is supplied.
 
+Both fixtures were generated for this project from FFmpeg's synthetic pattern;
+they contain no phone recordings, personal content, or third-party footage.
+They are included under the repository's GPL-3.0-or-later license. The commands
+below reproduce the content and codec configuration; encoder versions may
+produce different binary output.
+
 Generated with FFmpeg 9.0.1 and libx265:
 
 ```sh

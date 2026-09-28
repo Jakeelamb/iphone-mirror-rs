@@ -1113,8 +1113,6 @@ dependencies = [
  "naga",
  "plist",
  "pollster",
- "serde",
- "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
