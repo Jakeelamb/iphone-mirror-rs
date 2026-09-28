@@ -208,6 +208,55 @@ clean timing run before making an improvement claim.
 
 ## Smoothness comparisons
 
+### Validation on 2026-09-28
+
+Production revision `a21cca6` includes bounded mouse-displacement conservation
+across look recenters and the timing/presentation controls below. The subsequent
+fixture correction separates source timers from redraws. Offline validation
+passed 126 tests, formatting and all-target Clippy; one optional GPU test was
+ignored. Release builds of the viewer and fixture succeeded.
+
+A live iPhone 15/iOS 27 Wi-Fi training session used CUDA decoding with an
+isolated Sway/llvmpipe viewer. Screenshots confirmed W, W+A, A, neutral stopping,
+rapid direction handoffs, mouse look while moving with Q and E lean, manual
+fire, and Escape while movement keys were held. The run recorded 105 look
+recenters, zero clipped mouse callbacks, a queue high-water mark of 11/128,
+and zero surface timeouts. All 434 successful local input writes had an
+enqueue-to-completion p99 bucket of at most 6 ms; this is **not** phone response
+time. Absolute-pointer automation under cursor lock is not a calibrated raw
+mouse-distance benchmark. Toggle-mode game actions can remain active after
+their touch releases. These are functional checks, not evidence of a perceptual
+smoothness gain or physical display timing.
+
+With the corrected fixture, two isolated Immediate/latency-1 runs each produced
+600 source steps in approximately 10 seconds at a 60 Hz target. Notification
+off submitted 600 distinct pictures with no replacements; notification on
+submitted 300 with 300 replacements. Neither ended with a pending frame. This
+is a compositor-specific observation, not a phone or physical GPU benchmark.
+Notification remains off by default.
+
+Four sequential 35-second sessions (including connection setup) used CUDA
+decoding and AMD Radeon 890M Vulkan rendering on the physical Hyprland desktop,
+with requested frame latency 1 throughout:
+
+| Presentation / notification | Decoded / submitted | Replaced | Receipt→submit mean | Submission interval p99 |
+| --- | ---: | ---: | ---: | ---: |
+| Immediate / off | 1,755 / 1,755 | 0 | 3.16 ms | ≤34 ms |
+| Mailbox / off | 1,759 / 1,759 | 0 | 3.24 ms | ≤33 ms |
+| Immediate / on | 1,755 / 1,745 | 10 | 2.99 ms | ≤33 ms |
+| Immediate / off, repeat | 1,759 / 1,759 | 0 | 3.01 ms | ≤34 ms |
+
+All reported zero surface timeouts and zero source-stamp samples. These are
+trace-based host-stage observations: the physical window could not be captured
+through the available GUI adapter, scene content was not continuously verified,
+and the repeat recorded two input writes. No scripted control workload ran
+during these trials. They do not rank perceptual smoothness or establish a
+latency improvement; the baseline repeat alone varied by roughly the same
+amount as the notification comparison. Defaults remain Auto (Immediate on
+this adapter), frame latency 1, notification off.
+
+### Running comparisons
+
 The [research report](smoothness-research.md) records evidence at `f1958b5`.
 The implementation following it adds bounded mouse-vector segmentation,
 content-free timing counters and explicit presentation experiments. It does not
@@ -234,7 +283,10 @@ Build it with `cargo build --release --locked --example render_fixture`.
 Then change **one** flag per run: explicit Mailbox or FIFO, notify on, or frame
 latency 2. Log the actual renderer/mode and elapsed run time. The fixture's
 target rate is not a guarantee that the compositor presents at that rate.
-Its first-picture default remains useful for screenshot comparisons.
+Its first-picture default remains useful for screenshot comparisons. Source
+steps advance on a main-loop timer independently of redraw requests, but a
+blocked main thread can still delay production. Compare `frames`, `submitted`,
+`replaced` and final `pending`; repeated UI redraws do not count as new pictures.
 
 For live comparisons, keep the same training scene, profile, decoder, transport
 and desktop conditions. A bounded example, after the phone is ready:
