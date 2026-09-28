@@ -7,6 +7,7 @@ struct Parameters {
     // Screen radius, button radius, button state, physical pixels per logical pixel.
     style: vec4<f32>,
     coefficients: vec4<f32>,
+    rotation: vec4<f32>,
 };
 @group(0) @binding(0) var y_plane: texture_2d<f32>;
 @group(0) @binding(1) var u_plane: texture_2d<f32>;
@@ -43,6 +44,17 @@ fn house_distance(point: vec2<f32>) -> f32 {
     return min(d, segment_distance(point, vec2(1.8, 1.), vec2(1.8, 6.)));
 }
 
+// Display coordinates -> encoded-buffer coordinates. This is the same inverse
+// clockwise mapping used for HID hit testing; no CPU pixel rotation is needed.
+fn source_uv(display_uv: vec2<f32>) -> vec2<f32> {
+    switch u32(parameters.rotation.x) {
+        case 90u: { return vec2(display_uv.y, 1. - display_uv.x); }
+        case 180u: { return vec2(1. - display_uv.x, 1. - display_uv.y); }
+        case 270u: { return vec2(1. - display_uv.y, display_uv.x); }
+        default: { return display_uv; }
+    }
+}
+
 @fragment
 fn fragment(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let point = position.xy;
@@ -66,7 +78,7 @@ fn fragment(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     } else if parameters.screen.z > 0. && parameters.screen.w > 0. {
         let distance = rounded_distance(point, parameters.screen, parameters.style.x);
         if distance < 0.5 {
-            let uv = (point - parameters.screen.xy) / parameters.screen.zw;
+            let uv = source_uv((point - parameters.screen.xy) / parameters.screen.zw);
             var y = textureSampleLevel(y_plane, plane_sampler, uv, 0.).r;
             let chroma = textureSampleLevel(u_plane, plane_sampler, uv, 0.);
             var u = chroma.r - 128. / 255.;

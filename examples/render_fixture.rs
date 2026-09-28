@@ -1,8 +1,11 @@
 //! Offline surface smoke test: `cargo run --example render_fixture`.
 //! Add `--hardware` to exercise hardware decode and NV12 presentation.
+//! Add `--rotation 0|90|180|270` to check clockwise GPU rotation.
 //! Displays only synthetic testsrc2 content and never opens a device connection.
-use anyhow::{Context, Result};
-use iphone_mirror_rs::video::{DecodeMode, DecodedFrame, Decoder, Renderer, ViewerLayout};
+use anyhow::{Context, Result, bail};
+use iphone_mirror_rs::video::{
+    DecodeMode, DecodedFrame, Decoder, Renderer, ViewerLayout, displayed_size,
+};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
@@ -22,6 +25,7 @@ struct Fixture {
     error: Option<anyhow::Error>,
     home_hovered: bool,
     home_armed: bool,
+    rotation: u16,
 }
 
 impl Fixture {
@@ -33,7 +37,9 @@ impl Fixture {
                     .with_inner_size(LogicalSize::new(600, 700)),
             )?,
         );
-        self.renderer = Some(pollster::block_on(Renderer::new(window.clone()))?);
+        let mut renderer = pollster::block_on(Renderer::new(window.clone()))?;
+        renderer.set_rotation(self.rotation);
+        self.renderer = Some(renderer);
         self.window = Some(window);
         Ok(())
     }
@@ -89,11 +95,12 @@ impl ApplicationHandler for Fixture {
             WindowEvent::CursorMoved { position, .. } => {
                 if let (Some(window), Some(frame)) = (&self.window, &self.frame) {
                     let size = window.inner_size();
+                    let (width, height) = displayed_size(frame.width, frame.height, self.rotation);
                     self.home_hovered = ViewerLayout::new(
                         size.width,
                         size.height,
-                        frame.width,
-                        frame.height,
+                        width,
+                        height,
                         window.scale_factor(),
                     )
                     .home_contains(position.x, position.y);
@@ -153,11 +160,25 @@ fn main() -> Result<()> {
         .windows(2)
         .map(|range| &data[range[0]..range[1]])
         .collect();
-    let mode = if std::env::args().any(|argument| argument == "--hardware") {
-        DecodeMode::Auto
-    } else {
-        DecodeMode::Software
-    };
+    let mut mode = DecodeMode::Software;
+    let mut rotation = 0;
+    let mut arguments = std::env::args().skip(1);
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--hardware" => mode = DecodeMode::Auto,
+            "--rotation" => {
+                rotation = arguments
+                    .next()
+                    .context("--rotation requires degrees")?
+                    .parse::<u16>()
+                    .context("invalid rotation")?;
+                if !matches!(rotation, 0 | 90 | 180 | 270) {
+                    bail!("rotation must be 0, 90, 180 or 270");
+                }
+            }
+            _ => bail!("unknown argument; use --hardware or --rotation 0|90|180|270"),
+        }
+    }
     let mut app = Fixture {
         window: None,
         renderer: None,
@@ -169,6 +190,7 @@ fn main() -> Result<()> {
         error: None,
         home_hovered: false,
         home_armed: false,
+        rotation,
     };
     EventLoop::new()?
         .run_app(&mut app)

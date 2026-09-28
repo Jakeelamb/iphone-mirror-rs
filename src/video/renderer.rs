@@ -1,5 +1,6 @@
 use super::frame::{DecodedFrame, Layout};
 use super::layout::ViewerLayout;
+use super::orientation::{displayed_size, normalized_rotation};
 use anyhow::{Context, Result, ensure};
 use std::sync::Arc;
 use std::time::Instant;
@@ -14,6 +15,7 @@ struct Parameters {
     footer: [f32; 4],
     style: [f32; 4],
     coefficients: [f32; 4],
+    rotation: [f32; 4],
 }
 
 struct Textures {
@@ -39,6 +41,7 @@ pub struct Renderer {
     textures: Option<Textures>,
     home_hovered: bool,
     home_pressed: bool,
+    rotation: u16,
 }
 
 impl Renderer {
@@ -186,6 +189,7 @@ impl Renderer {
             textures: None,
             home_hovered: false,
             home_pressed: false,
+            rotation: 0,
         })
     }
 
@@ -195,6 +199,14 @@ impl Renderer {
         let changed = self.home_hovered != hovered || self.home_pressed != pressed;
         self.home_hovered = hovered;
         self.home_pressed = pressed;
+        changed
+    }
+
+    /// Rotate texture coordinates on the GPU; decoded plane storage is unchanged.
+    pub fn set_rotation(&mut self, clockwise_degrees: u16) -> bool {
+        let rotation = normalized_rotation(clockwise_degrees);
+        let changed = self.rotation != rotation;
+        self.rotation = rotation;
         changed
     }
 
@@ -253,11 +265,13 @@ impl Renderer {
             );
         }
         let scale_factor = self.window.scale_factor();
+        let (display_width, display_height) =
+            displayed_size(frame.width, frame.height, self.rotation);
         let geometry = ViewerLayout::new(
             self.config.width,
             self.config.height,
-            frame.width,
-            frame.height,
+            display_width,
+            display_height,
             scale_factor,
         );
         let rectangle = |rect: super::layout::Rect| {
@@ -299,6 +313,7 @@ impl Renderer {
             } else {
                 [1.402, -0.344136, -0.714136, 1.772]
             },
+            rotation: [f32::from(self.rotation), 0.0, 0.0, 0.0],
         };
         self.queue
             .write_buffer(&self.uniform, 0, bytemuck::bytes_of(&parameters));
