@@ -77,7 +77,8 @@ quick direction changes. Escape, focus loss and leaving game mode lift it.
 Profiles are small `name=value` text files with `version=1`. Targets use
 `name=x,y`, with both coordinates between 0 and 1. Calibration fills them in.
 `sensitivity=0.002` is the fraction of the phone's displayed short edge per
-relative mouse pixel. Lower it for slower aiming. `joystick_radius=0.08` is
+raw relative mouse unit (device/backend dependent, not screen pixels). Lower it
+for slower aiming. `joystick_radius=0.08` is
 also measured relative to the short edge; increase it if movement does not
 reach full speed. Restart the viewer after editing the file.
 
@@ -87,8 +88,13 @@ rejected until a button is released and pressed again. Key repeat never starts
 another touch.
 
 Looking lifts and recenters its own contact at the edge of a small region while
-preserving movement and buttons. An unusually large mouse delta is clipped at
-that region's edge. This is touch-based aiming: sensitivity, acceleration,
+preserving movement and buttons. Mouse vectors are split at region boundaries
+and continued from the center in the same callback, preserving displacement
+within contact-coordinate rounding. Work is limited to eight segment attempts
+per callback; extreme deltas or outward motion from an edge calibration are
+discarded beyond that bound and counted as `clipped_mouse_events`. No remainder
+is queued for replay after the mouse stops. `look_resets` counts reanchors.
+This is touch-based aiming: sensitivity, acceleration,
 touch sampling and game behavior still apply. It is not guaranteed to behave
 like native PC raw-mouse input.
 

@@ -124,7 +124,7 @@ impl From<std::io::Error> for GameError {
 #[derive(Clone, Debug)]
 pub struct Profile {
     points: [Option<Point>; 13],
-    /// Fraction of the displayed short edge per relative mouse pixel.
+    /// Fraction of the displayed short edge per raw relative mouse unit.
     pub sensitivity: f64,
     /// Joystick displacement as a fraction of the displayed short edge.
     pub joystick_radius: f64,
@@ -279,21 +279,25 @@ impl Profile {
 }
 #[derive(Debug, Default)]
 pub struct EventBatch {
-    pub events: [Option<HidEvent>; 8],
+    pub events: [Option<HidEvent>; 32],
     pub error: Option<GameError>,
+    /// Look contacts lifted and reanchored by this operation (not initial down).
+    pub look_resets: u32,
+    /// Motion remained after the per-callback work bound, or was invalid/blocked.
+    pub clipped_motion: bool,
 }
 impl EventBatch {
     fn push(&mut self, event: HidEvent) {
         if let Some(slot) = self.events.iter_mut().find(|e| e.is_none()) {
             *slot = Some(event);
         } else {
-            unreachable!("a game input operation emits at most five frames");
+            unreachable!("eight look segments and their transitions fit in 32 frames");
         }
     }
 }
 impl IntoIterator for EventBatch {
     type Item = Option<HidEvent>;
-    type IntoIter = std::array::IntoIter<Self::Item, 8>;
+    type IntoIter = std::array::IntoIter<Self::Item, 32>;
     fn into_iter(self) -> Self::IntoIter {
         self.events.into_iter()
     }
@@ -443,16 +447,22 @@ impl GameState {
         }
         batch
     }
-    /// Recenter at a look-region edge; an oversized event is clipped to that
-    /// region after recentering, so excess mouse displacement is not replayed.
+    /// Split a mouse vector at look-region edges, lifting/reanchoring between
+    /// segments. Process at most eight segments in this callback; discard any
+    /// remaining displacement with an explicit flag, never a deferred tail.
     pub fn motion(&mut self, dx: f64, dy: f64, rotation: u16, timestamp: u64) -> EventBatch {
+        const MAX_SEGMENTS: usize = 8;
         let mut batch = self.orient(rotation, timestamp);
-        if !dx.is_finite() || !dy.is_finite() || (dx == 0.0 && dy == 0.0) {
+        if !dx.is_finite() || !dy.is_finite() {
+            batch.clipped_motion = true;
+            return batch;
+        }
+        if dx == 0.0 && dy == 0.0 {
             return batch;
         }
         let center = self.point(Target::Look);
         let (sx, sy) = self.scale();
-        let (dx, dy) = (
+        let (mut dx, mut dy) = (
             dx * self.profile.sensitivity * sx,
             dy * self.profile.sensitivity * sy,
         );
@@ -463,24 +473,52 @@ impl GameState {
             (center.y - 0.16 * sy).max(0.0),
             (center.y + 0.16 * sy).min(1.0),
         );
-        if self.contacts[1].is_some()
-            && (p.x + dx < bounds.0
-                || p.x + dx > bounds.1
-                || p.y + dy < bounds.2
-                || p.y + dy > bounds.3)
-        {
+        // One common fraction preserves the vector direction at edges/corners.
+        let fraction = |p: Point, dx: f64, dy: f64| {
+            let axis = |position: f64, delta: f64, low: f64, high: f64| {
+                if delta > 0.0 {
+                    (high - position) / delta
+                } else if delta < 0.0 {
+                    (low - position) / delta
+                } else {
+                    1.0
+                }
+            };
+            axis(p.x, dx, bounds.0, bounds.1)
+                .min(axis(p.y, dy, bounds.2, bounds.3))
+                .clamp(0.0, 1.0)
+        };
+        for segment in 0..MAX_SEGMENTS {
+            let part = fraction(p, dx, dy);
+            if part > 0.0 {
+                if self.contacts[1].is_none() {
+                    self.contacts[1] = Some(self.contact(p, None));
+                    batch.push(self.report(TouchPhase::Begin, 0, timestamp));
+                }
+                p.x = (p.x + dx * part).clamp(bounds.0, bounds.1);
+                p.y = (p.y + dy * part).clamp(bounds.2, bounds.3);
+                self.look = Some(p);
+                self.contacts[1] = Some(self.contact(p, None));
+                batch.push(self.report(TouchPhase::Move, 0, timestamp));
+                if part == 1.0 {
+                    return batch;
+                }
+                dx *= 1.0 - part;
+                dy *= 1.0 - part;
+            }
+            // A target exactly on the screen edge cannot accept outward motion.
+            // Avoid an endless lift/down loop or shifting the calibrated anchor.
+            if segment + 1 == MAX_SEGMENTS || fraction(center, dx, dy) == 0.0 {
+                batch.clipped_motion = true;
+                break;
+            }
             self.release_slot(1, timestamp, &mut batch);
             p = center;
-        }
-        if self.contacts[1].is_none() {
             self.contacts[1] = Some(self.contact(center, None));
+            self.look = Some(center);
             batch.push(self.report(TouchPhase::Begin, 0, timestamp));
+            batch.look_resets += 1;
         }
-        p.x = (p.x + dx).clamp(bounds.0, bounds.1);
-        p.y = (p.y + dy).clamp(bounds.2, bounds.3);
-        self.look = Some(p);
-        self.contacts[1] = Some(self.contact(p, None));
-        batch.push(self.report(TouchPhase::Move, 0, timestamp));
         batch
     }
     pub fn release_all(&mut self, timestamp: u64) -> EventBatch {
@@ -508,6 +546,42 @@ mod tests {
     }
     fn state() -> GameState {
         GameState::new(profile()).unwrap()
+    }
+    fn emitted_look_displacement(batches: impl IntoIterator<Item = EventBatch>) -> (i64, i64) {
+        let mut previous = None;
+        let mut total = (0, 0);
+        for batch in batches {
+            for (_, report) in reports(batch) {
+                match contact(&report, 1) {
+                    Some((true, x, y)) => {
+                        if let Some((px, py)) = previous {
+                            total.0 += i64::from(x) - i64::from(px);
+                            total.1 += i64::from(y) - i64::from(py);
+                        }
+                        previous = Some((x, y));
+                    }
+                    _ => previous = None,
+                }
+            }
+        }
+        total
+    }
+
+    #[test]
+    fn look_displacement_is_independent_of_mouse_event_grouping() {
+        let mut one = state();
+        let mut split = state();
+        let whole = emitted_look_displacement([one.motion(100.0, 0.0, 0, 1)]);
+        let pieces = emitted_look_displacement([
+            split.motion(50.0, 0.0, 0, 1),
+            split.motion(50.0, 0.0, 0, 2),
+        ]);
+        assert!(
+            (whole.0 - pieces.0).abs() <= 2,
+            "100 units: {whole:?}; 2x50: {pieces:?}"
+        );
+        assert!((whole.0 as f64 - 0.2 * 65535.0).abs() <= 2.0);
+        assert_eq!((whole.1, pieces.1), (0, 0));
     }
     fn reports(batch: EventBatch) -> Vec<(TouchPhase, [u8; 58])> {
         assert!(batch.error.is_none());
@@ -751,13 +825,17 @@ mod tests {
         let frames = reports(s.motion(60.0, 0.0, 0, 2));
         assert_eq!(
             frames.iter().map(|f| f.0).collect::<Vec<_>>(),
-            [TouchPhase::End, TouchPhase::Begin, TouchPhase::Move]
+            [
+                TouchPhase::Move,
+                TouchPhase::End,
+                TouchPhase::Begin,
+                TouchPhase::Move
+            ]
         );
-        assert_eq!(
-            contact(&frames[0].1, 1),
-            Some((false, old_look.1, old_look.2))
-        );
-        assert_eq!(contact(&frames[1].1, 1), Some((true, 32768, 32768)));
+        let edge = contact(&frames[0].1, 1).unwrap();
+        assert!(edge.1 > old_look.1);
+        assert_eq!(contact(&frames[1].1, 1), Some((false, edge.1, edge.2)));
+        assert_eq!(contact(&frames[2].1, 1), Some((true, 32768, 32768)));
         for (_, frame) in frames {
             assert_eq!(contact(&frame, 2), Some(old_fire));
         }
@@ -766,6 +844,255 @@ mod tests {
         let (_, x, y) = contact(&large.last().unwrap().1, 1).unwrap();
         assert!((f64::from(x) / 65535.0 - 0.66).abs() < 0.0001);
         assert!((f64::from(y) / 65535.0 - 0.34).abs() < 0.0001);
+    }
+
+    fn rotated_vector(x: f64, y: f64, rotation: u16) -> (f64, f64) {
+        match rotation {
+            90 => (y, -x),
+            180 => (-x, -y),
+            270 => (-y, x),
+            _ => (x, y),
+        }
+    }
+
+    #[test]
+    fn look_vectors_conserve_displacement_across_groupings_aspects_and_rotations() {
+        for aspect in [0.01, 0.5, 1.0, 2.0, 100.0] {
+            for rotation in [0, 90, 180, 270] {
+                for (dx, dy) in [
+                    (80.0, 0.0),
+                    (81.0, 0.0),
+                    (-220.0, 0.0),
+                    (0.0, 220.0),
+                    (220.0, 73.0),
+                    (-73.0, 220.0),
+                    (160.0, 160.0),
+                    (-160.0, -160.0),
+                ] {
+                    for groups in [1, 2, 5, 20] {
+                        let mut s = state();
+                        s.set_aspect(aspect).unwrap();
+                        let (sx, sy) = s.scale();
+                        let expected = rotated_vector(
+                            dx * 0.002 * sx * 65535.0,
+                            dy * 0.002 * sy * 65535.0,
+                            rotation,
+                        );
+                        let mut segments = 1;
+                        let batches: Vec<_> = (0..groups)
+                            .map(|timestamp| {
+                                let batch = s.motion(
+                                    dx / f64::from(groups),
+                                    dy / f64::from(groups),
+                                    rotation,
+                                    timestamp as u64,
+                                );
+                                assert!(!batch.clipped_motion);
+                                segments += batch.look_resets;
+                                batch
+                            })
+                            .collect();
+                        let actual = emitted_look_displacement(batches);
+                        // Moves within one contact telescope. Each independent
+                        // segment has two rounded endpoints, hence <1 code of
+                        // error per axis, regardless of raw event count.
+                        let tolerance = f64::from(segments) + 1e-8;
+                        assert!(
+                            (actual.0 as f64 - expected.0).abs() <= tolerance,
+                            "x {actual:?} vs {expected:?}, {segments} segments, {aspect}, {rotation}, {groups}"
+                        );
+                        assert!(
+                            (actual.1 as f64 - expected.1).abs() <= tolerance,
+                            "y {actual:?} vs {expected:?}, {segments} segments, {aspect}, {rotation}, {groups}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn look_edge_segments_keep_full_vector_direction() {
+        for (dx, dy) in [(220.0, 73.0), (-73.0, 220.0), (160.0, 160.0)] {
+            let mut s = state();
+            let mut previous = None;
+            let batch = s.motion(dx, dy, 0, 0);
+            assert!(batch.look_resets > 0);
+            for (phase, report) in reports(batch) {
+                assert_ne!(phase, TouchPhase::AnchorBegin);
+                match contact(&report, 1) {
+                    Some((true, x, y)) => {
+                        if let Some((px, py)) = previous {
+                            let vx = f64::from(x) - f64::from(px);
+                            let vy = f64::from(y) - f64::from(py);
+                            assert!(vx * dx >= 0.0 && vy * dy >= 0.0);
+                            // Each axis displacement has <1 code rounding error.
+                            assert!((vx * dy - vy * dx).abs() <= dx.abs() + dy.abs());
+                        }
+                        previous = Some((x, y));
+                    }
+                    _ => previous = None,
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn look_reverses_from_boundary_without_unnecessary_reset() {
+        let mut s = state();
+        let edge = s.motion(80.0, 0.0, 0, 0);
+        assert_eq!(edge.look_resets, 0);
+        let reverse = s.motion(-40.0, 0.0, 0, 1);
+        assert_eq!(reverse.look_resets, 0);
+        assert_eq!(reports(reverse).len(), 1);
+        let onward = s.motion(80.0, 0.0, 0, 2);
+        assert_eq!(onward.look_resets, 1);
+        assert!(!onward.clipped_motion);
+
+        let mut s = state();
+        let mut segments = 1;
+        let batches: Vec<_> = [(120.0, 40.0), (-240.0, -80.0), (120.0, 40.0)]
+            .into_iter()
+            .map(|(dx, dy)| {
+                let batch = s.motion(dx, dy, 0, 0);
+                segments += batch.look_resets;
+                assert!(!batch.clipped_motion);
+                batch
+            })
+            .collect();
+        let total = emitted_look_displacement(batches);
+        assert!(total.0.abs() <= i64::from(segments));
+        assert!(total.1.abs() <= i64::from(segments));
+    }
+
+    #[test]
+    fn look_repeated_resets_have_only_per_contact_quantization_error() {
+        for rotation in [0, 90, 180, 270] {
+            let mut s = state();
+            let mut segments = 1;
+            let batches: Vec<_> = (0..1000)
+                .map(|timestamp| {
+                    let batch = s.motion(100.0, 37.0, rotation, timestamp);
+                    assert!(!batch.clipped_motion);
+                    segments += batch.look_resets;
+                    batch
+                })
+                .collect();
+            let actual = emitted_look_displacement(batches);
+            let expected = rotated_vector(
+                100_000.0 * 0.002 * 65535.0,
+                37_000.0 * 0.002 * 65535.0,
+                rotation,
+            );
+            assert!((actual.0 as f64 - expected.0).abs() <= f64::from(segments));
+            assert!((actual.1 as f64 - expected.1).abs() <= f64::from(segments));
+        }
+    }
+
+    #[test]
+    fn look_keeps_held_contacts_and_neutral_joystick_then_releases_without_tail() {
+        let mut s = state();
+        reports(s.key(Action::Up, true, 0, 0));
+        reports(s.key(Action::LeanLeft, true, 0, 1));
+        let held = reports(s.key(Action::Fire, true, 0, 2))[0].1;
+        let motion = s.motion(300.0, -170.0, 0, 3);
+        assert!(!motion.clipped_motion);
+        assert!(motion.look_resets > 0);
+        for (_, report) in reports(motion) {
+            for id in [0, 2, 3] {
+                assert_eq!(contact(&report, id), contact(&held, id));
+            }
+        }
+        let neutral = reports(s.key(Action::Up, false, 0, 4))[0].1;
+        assert_eq!(contact(&neutral, 0), Some((true, 32768, 32768)));
+        for (_, report) in reports(s.motion(400.0, 0.0, 0, 5)) {
+            for id in [0, 2, 3] {
+                assert_eq!(contact(&report, id), contact(&neutral, id));
+            }
+        }
+        let released = reports(s.release_all(6));
+        assert_eq!(released.len(), 1);
+        for id in [0, 1, 2, 3] {
+            assert!(!contact(&released[0].1, id).unwrap().0);
+        }
+        assert!(reports(s.motion(0.0, 0.0, 0, 7)).is_empty());
+        assert!(reports(s.key(Action::Up, false, 0, 8)).is_empty());
+        let next = reports(s.motion(1.0, 0.0, 0, 9));
+        assert_eq!(next.len(), 2);
+        assert_eq!(next[0].1[1], 1);
+        assert_eq!(contact(&next[0].1, 1), Some((true, 32768, 32768)));
+    }
+
+    #[test]
+    fn extreme_and_edge_look_motion_is_bounded_and_reports_clipping() {
+        for center in [
+            Point { x: 0.5, y: 0.5 },
+            Point { x: 0.0, y: 0.0 },
+            Point { x: 1.0, y: 1.0 },
+            Point {
+                x: 0.00001,
+                y: 0.99999,
+            },
+        ] {
+            for aspect in [0.01, 1.0, 100.0] {
+                for rotation in [0, 90, 180, 270] {
+                    for (dx, dy) in [
+                        (f64::MAX, f64::MAX),
+                        (-f64::MAX, f64::MAX),
+                        (f64::MAX, -f64::MAX),
+                        (-f64::MAX, -f64::MAX),
+                    ] {
+                        let mut p = profile();
+                        p.set_point(Target::Look, center).unwrap();
+                        let mut s = GameState::new(p).unwrap();
+                        s.set_aspect(aspect).unwrap();
+                        reports(s.key(Action::Fire, true, 0, 0));
+                        let batch = s.motion(dx, dy, rotation, 1);
+                        assert!(batch.clipped_motion);
+                        assert!(batch.look_resets <= 7);
+                        assert!(reports(batch).len() <= 24);
+                        // No clipped displacement is deferred to a later event.
+                        assert!(reports(s.motion(0.0, 0.0, rotation, 2)).is_empty());
+                        reports(s.release_all(3));
+                        assert!(reports(s.release_all(4)).is_empty());
+                    }
+                }
+            }
+        }
+        let mut p = profile();
+        p.set_point(Target::Look, Point { x: 0.0, y: 0.0 }).unwrap();
+        let mut s = GameState::new(p).unwrap();
+        let blocked = s.motion(-1.0, 1.0, 0, 0);
+        assert!(blocked.clipped_motion);
+        assert_eq!(blocked.look_resets, 0);
+        assert!(reports(blocked).is_empty());
+        let inward = s.motion(100.0, 50.0, 0, 1);
+        assert!(!inward.clipped_motion);
+        let actual = emitted_look_displacement([inward]);
+        assert!((actual.0 as f64 - 0.2 * 65535.0).abs() <= 2.0);
+        assert!((actual.1 as f64 - 0.1 * 65535.0).abs() <= 2.0);
+    }
+
+    #[test]
+    fn invalid_look_motion_preserves_contacts_and_flags_invalid_input() {
+        let mut s = state();
+        let first = reports(s.motion(10.0, 0.0, 0, 0));
+        let old = contact(&first[1].1, 1).unwrap();
+        for (dx, dy) in [
+            (f64::NAN, 0.0),
+            (0.0, f64::INFINITY),
+            (f64::NEG_INFINITY, 1.0),
+        ] {
+            let batch = s.motion(dx, dy, 0, 1);
+            assert!(batch.clipped_motion);
+            assert_eq!(batch.look_resets, 0);
+            assert!(reports(batch).is_empty());
+        }
+        let zero = s.motion(0.0, 0.0, 0, 2);
+        assert!(!zero.clipped_motion);
+        assert!(reports(zero).is_empty());
+        let release = reports(s.release_all(3));
+        assert_eq!(contact(&release[0].1, 1), Some((false, old.1, old.2)));
     }
     #[test]
     fn rotation_releases_old_coordinates_then_maps_new_contacts() {
