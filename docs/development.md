@@ -72,6 +72,8 @@ The offline surface viewer exercises window presentation:
 cargo run --example render_fixture
 cargo run --example render_fixture -- --hardware
 cargo run --example render_fixture -- --rotation 270
+cargo run --release --example render_fixture -- --animate --fps 60 --frames 180 \
+  --present-mode fifo --pre-present-notify on --frame-latency 1
 ```
 
 Use an isolated desktop for routine UI verification. Resize between wide and
@@ -79,6 +81,13 @@ narrow windows to inspect both letterbox directions. Synthetic captures can be
 compared against FFmpeg's RGB conversion using the same color-matrix choice.
 An isolated compositor may select llvmpipe; a correct screenshot there does not
 qualify physical GPU performance.
+
+`--animate` loops the complete synthetic sequence; the default repeats its first
+picture for stable screenshots. `--fps 1..240` controls the fixture's target rate
+(default 30), and `--frames N` closes it after N decoded fixture steps. These are
+local synthetic pictures, not phone capture-rate controls. The normal test suite
+verifies immediate output and content changes across two complete loops without
+opening a window. All presentation flags use the viewer's shared validation.
 
 For a device change, separately verify discovery, authentication, media, actual
 decoder selection, rendering, input, loss recovery and clean shutdown. USB

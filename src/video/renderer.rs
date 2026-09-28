@@ -1,9 +1,10 @@
 use super::frame::{DecodedFrame, Layout};
 use super::layout::ViewerLayout;
 use super::orientation::{displayed_size, normalized_rotation};
+use super::presentation::PresentationOptions;
 use anyhow::{Context, Result, ensure};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use winit::window::Window;
 
 #[path = "status.rs"]
@@ -30,6 +31,15 @@ struct Textures {
     bind_group: wgpu::BindGroup,
 }
 
+/// Host-side render attempt timings. These do not measure GPU completion or scanout.
+#[derive(Clone, Copy, Debug)]
+pub struct RenderSample {
+    pub submitted_at: Option<Instant>,
+    pub upload: Duration,
+    pub surface_acquire: Duration,
+    pub total: Duration,
+}
+
 /// GPU YUV conversion and presentation; textures are recreated only on format
 /// changes. Hardware decode currently includes a CPU download/upload boundary.
 pub struct Renderer {
@@ -48,10 +58,11 @@ pub struct Renderer {
     home_hovered: bool,
     home_pressed: bool,
     rotation: u16,
+    pre_present_notify: bool,
 }
 
 impl Renderer {
-    pub async fn new(window: Arc<Window>) -> Result<Self> {
+    pub async fn new(window: Arc<Window>, options: PresentationOptions) -> Result<Self> {
         let size = window.inner_size();
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
         let surface = instance
@@ -85,21 +96,14 @@ impl Renderer {
             .copied()
             .find(|format| !format.is_srgb())
             .context("GPU surface has no non-sRGB format")?;
-        let present_mode = [
-            wgpu::PresentMode::Immediate,
-            wgpu::PresentMode::Mailbox,
-            wgpu::PresentMode::Fifo,
-        ]
-        .into_iter()
-        .find(|mode| capabilities.present_modes.contains(mode))
-        .context("GPU surface has no present mode")?;
+        let present_mode = options.select_mode(&capabilities.present_modes)?;
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
             width: size.width.max(1),
             height: size.height.max(1),
             present_mode,
-            desired_maximum_frame_latency: 1,
+            desired_maximum_frame_latency: options.frame_latency,
             alpha_mode: capabilities
                 .alpha_modes
                 .first()
@@ -199,7 +203,11 @@ impl Renderer {
             multiview: None,
             cache: None,
         });
-        tracing::info!(gpu = %info.name, backend = ?info.backend, ?present_mode, "GPU renderer ready");
+        tracing::info!(gpu = %info.name, backend = ?info.backend, ?present_mode,
+            supported_present_modes = ?capabilities.present_modes,
+            requested_frame_latency = options.frame_latency,
+            pre_present_notify = options.pre_present_notify,
+            "GPU renderer ready; configuration does not establish physical scanout behavior");
         Ok(Self {
             window,
             surface,
@@ -216,6 +224,7 @@ impl Renderer {
             home_hovered: false,
             home_pressed: false,
             rotation: 0,
+            pre_present_notify: options.pre_present_notify,
         })
     }
 
@@ -257,8 +266,8 @@ impl Renderer {
         self.surface.configure(&self.device, &self.config);
     }
 
-    /// Returns true after submission, or false if a surface timeout skipped it.
-    pub fn render(&mut self, frame: &DecodedFrame) -> Result<bool> {
+    /// Timings include skipped timeout attempts; submitted_at is set only after present.
+    pub fn render(&mut self, frame: &DecodedFrame) -> Result<RenderSample> {
         let started = Instant::now();
         ensure!(
             frame.width <= self.device.limits().max_texture_dimension_2d
@@ -302,6 +311,7 @@ impl Renderer {
                 },
             );
         }
+        let upload = started.elapsed();
         let scale_factor = self.window.scale_factor();
         let (display_width, display_height) =
             displayed_size(frame.width, frame.height, self.rotation);
@@ -355,6 +365,7 @@ impl Renderer {
         };
         self.queue
             .write_buffer(&self.uniform, 0, bytemuck::bytes_of(&parameters));
+        let acquire_started = Instant::now();
         let output = match self.surface.get_current_texture() {
             Ok(output) => output,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
@@ -365,10 +376,16 @@ impl Renderer {
             }
             Err(wgpu::SurfaceError::Timeout) => {
                 tracing::warn!("GPU surface acquisition timed out; dropping decoded picture");
-                return Ok(false);
+                return Ok(RenderSample {
+                    submitted_at: None,
+                    upload,
+                    surface_acquire: acquire_started.elapsed(),
+                    total: started.elapsed(),
+                });
             }
             Err(error) => return Err(error).context("acquire GPU surface"),
         };
+        let surface_acquire = acquire_started.elapsed();
         let view = output.texture.create_view(&Default::default());
         let mut encoder = self
             .device
@@ -395,15 +412,26 @@ impl Renderer {
             pass.draw(0..4, 0..1);
         }
         self.queue.submit(Some(encoder.finish()));
+        if self.pre_present_notify {
+            self.window.pre_present_notify();
+        }
         output.present();
+        let submitted_at = Instant::now();
         tracing::trace!(
             stage = "present_submit",
             elapsed_us = started.elapsed().as_micros() as u64,
             receive_to_submit_us = frame.received_at.elapsed().as_micros() as u64,
             decode_to_submit_us = frame.decoded_at.elapsed().as_micros() as u64,
+            upload_us = upload.as_micros() as u64,
+            surface_acquire_us = surface_acquire.as_micros() as u64,
             "presentation submitted; excludes capture, network and compositor scanout"
         );
-        Ok(true)
+        Ok(RenderSample {
+            submitted_at: Some(submitted_at),
+            upload,
+            surface_acquire,
+            total: submitted_at.duration_since(started),
+        })
     }
 
     fn make_textures(&self, frame: &DecodedFrame) -> Textures {

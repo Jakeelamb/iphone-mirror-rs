@@ -58,7 +58,7 @@ fn main() -> Result<()> {
     metrics
         .measure_stamp
         .store(options.measure_stamp, std::sync::atomic::Ordering::Relaxed);
-    let input = Arc::new(session::InputBus::new());
+    let input = Arc::new(session::InputBus::new(metrics.clone()));
     let event_loop = if options.headless {
         None
     } else {
@@ -92,6 +92,7 @@ fn main() -> Result<()> {
     let gui_failed = if let Some(event_loop) = event_loop {
         let mut app = app::App::new(latest, input, metrics.clone(), stop_tx.clone());
         app.game = game;
+        app.presentation = options.presentation;
         event_loop.run_app(&mut app)?;
         app.failed
     } else {

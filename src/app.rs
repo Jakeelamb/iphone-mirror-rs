@@ -8,7 +8,8 @@ use iphone_mirror_rs::input::{
 };
 use iphone_mirror_rs::metrics::Metrics;
 use iphone_mirror_rs::video::{
-    DecodedFrame, LatestFrame, Renderer, ViewerLayout, displayed_size, visual_rotation,
+    DecodedFrame, LatestFrame, PresentationOptions, RenderSample, Renderer, ViewerLayout,
+    displayed_size, visual_rotation,
 };
 use tokio::sync::watch;
 use winit::application::ApplicationHandler;
@@ -34,6 +35,8 @@ pub struct App {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     frame: Option<DecodedFrame>,
+    frame_pending: bool,
+    last_submission: Option<Instant>,
     latest: Arc<LatestFrame>,
     input: Arc<InputBus>,
     metrics: Arc<Metrics>,
@@ -55,6 +58,7 @@ pub struct App {
     display_size: Option<(u32, u32)>,
     focused: bool,
     pub game: Option<crate::game_ui::GameControls>,
+    pub presentation: PresentationOptions,
     pub failed: bool,
 }
 
@@ -69,6 +73,8 @@ impl App {
             window: None,
             renderer: None,
             frame: None,
+            frame_pending: false,
+            last_submission: None,
             latest,
             input,
             metrics,
@@ -90,6 +96,7 @@ impl App {
             display_size: None,
             focused: false,
             game: None,
+            presentation: PresentationOptions::default(),
             failed: false,
         }
     }
@@ -377,11 +384,49 @@ impl App {
     }
 
     fn send_game(&mut self, batch: EventBatch) {
+        self.metrics
+            .look_resets
+            .fetch_add(u64::from(batch.look_resets), Ordering::Relaxed);
+        if batch.clipped_motion {
+            self.metrics
+                .clipped_mouse_events
+                .fetch_add(1, Ordering::Relaxed);
+        }
         if let Some(error) = &batch.error {
             tracing::warn!(%error, "game input rejected");
         }
         for event in batch {
             self.send(event);
+        }
+    }
+
+    fn record_render(&mut self, sample: RenderSample) {
+        self.metrics.render_attempts.fetch_add(1, Ordering::Relaxed);
+        self.metrics.upload.record(sample.upload);
+        self.metrics.surface_acquire.record(sample.surface_acquire);
+        self.metrics.render_submit.record(sample.total);
+        let Some(submitted_at) = sample.submitted_at else {
+            self.metrics
+                .surface_timeouts
+                .fetch_add(1, Ordering::Relaxed);
+            // A later UI redraw may successfully submit this retained picture.
+            return;
+        };
+        if !self.frame_pending {
+            return;
+        }
+        self.frame_pending = false;
+        self.metrics.submitted.fetch_add(1, Ordering::Relaxed);
+        if let Some(previous) = self.last_submission.replace(submitted_at) {
+            self.metrics
+                .submit_interval
+                .record(submitted_at.saturating_duration_since(previous));
+        }
+        if let Some(frame) = &self.frame {
+            self.metrics
+                .receive_to_submit
+                .record(submitted_at.saturating_duration_since(frame.received_at));
+            self.metrics.record_source_stamp(frame);
         }
     }
 
@@ -512,7 +557,7 @@ impl ApplicationHandler<AppEvent> for App {
                         .with_min_inner_size(LogicalSize::new(180.0, 240.0)),
                 )?,
             );
-            let renderer = pollster::block_on(Renderer::new(window.clone()))?;
+            let renderer = pollster::block_on(Renderer::new(window.clone(), self.presentation))?;
             Ok((window, renderer))
         })();
         match result {
@@ -588,26 +633,19 @@ impl ApplicationHandler<AppEvent> for App {
             }
             WindowEvent::RedrawRequested => {
                 let fresh = self.latest.take();
-                let changed = fresh.is_some();
                 if let Some(fresh) = fresh {
                     let geometry_changed = self.frame.as_ref().is_none_or(|previous| {
                         (previous.width, previous.height) != (fresh.width, fresh.height)
                     });
                     self.frame = Some(fresh);
+                    self.frame_pending = true;
                     if geometry_changed {
                         self.apply_view();
                     }
                 }
                 if let (Some(renderer), Some(frame)) = (&mut self.renderer, &self.frame) {
                     match renderer.render(frame) {
-                        Ok(true) if changed => {
-                            self.metrics.submitted.fetch_add(1, Ordering::Relaxed);
-                            self.metrics
-                                .receive_to_submit
-                                .record(frame.received_at.elapsed());
-                            self.metrics.record_source_stamp(frame);
-                        }
-                        Ok(_) => {}
+                        Ok(sample) => self.record_render(sample),
                         Err(error) => {
                             tracing::error!(%error, "GPU frame submission failed");
                             self.failed = true;
@@ -818,15 +856,45 @@ mod tests {
     use super::*;
     fn app() -> App {
         let (stop, _receiver) = watch::channel(false);
+        let metrics = Arc::new(Metrics::default());
         let mut app = App::new(
             Arc::new(LatestFrame::new()),
-            Arc::new(InputBus::new()),
-            Arc::new(Metrics::default()),
+            Arc::new(InputBus::new(metrics.clone())),
+            metrics,
             stop,
         );
         app.focused = true;
         app.connected = true;
         app
+    }
+
+    #[test]
+    fn presentation_metrics_keep_timeout_retry_and_ignore_retained_redraws() {
+        let mut app = app();
+        let first = Instant::now();
+        let sample = |submitted_at| RenderSample {
+            submitted_at,
+            upload: Duration::from_micros(200),
+            surface_acquire: Duration::from_millis(2),
+            total: Duration::from_millis(3),
+        };
+        app.frame_pending = true;
+        app.record_render(sample(None));
+        assert!(app.frame_pending);
+        assert_eq!(app.metrics.submitted.load(Ordering::Relaxed), 0);
+        app.record_render(sample(Some(first)));
+        assert!(!app.frame_pending);
+        assert_eq!(app.metrics.submitted.load(Ordering::Relaxed), 1);
+        app.record_render(sample(Some(first + Duration::from_millis(2))));
+        assert_eq!(app.metrics.submitted.load(Ordering::Relaxed), 1);
+        app.frame_pending = true;
+        app.record_render(sample(Some(first + Duration::from_millis(16))));
+        assert_eq!(app.metrics.submitted.load(Ordering::Relaxed), 2);
+        assert_eq!(app.metrics.submit_interval.samples(), 1);
+        assert_eq!(app.metrics.submit_interval.mean_ms(), 16.0);
+        assert_eq!(app.metrics.render_attempts.load(Ordering::Relaxed), 4);
+        assert_eq!(app.metrics.surface_timeouts.load(Ordering::Relaxed), 1);
+        assert_eq!(app.metrics.surface_acquire.samples(), 4);
     }
     fn events(app: &App) -> Vec<HidEvent> {
         let mut events = Vec::new();

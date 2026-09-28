@@ -3,6 +3,7 @@
 //! Report offsets follow the reference project's UniversalControl captures.
 //! An active DisplayService stream must exist before these reports are accepted.
 use std::collections::VecDeque;
+use std::time::Instant;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TouchPhase {
@@ -194,8 +195,18 @@ impl InputState {
 /// discard an error. This preserves releases without an unbounded event backlog.
 #[derive(Debug)]
 pub struct InputQueue {
-    events: VecDeque<HidEvent>,
+    events: VecDeque<QueuedInput>,
     limit: usize,
+}
+
+/// Monotonic host timestamps travel with the retained report. `enqueued_at`
+/// belongs to its latest snapshot; `retained_since` keeps the age of the queue
+/// slot across motion coalescing, not the age of that latest input sample.
+#[derive(Debug)]
+pub struct QueuedInput {
+    pub event: HidEvent,
+    pub enqueued_at: Instant,
+    pub retained_since: Instant,
 }
 
 impl InputQueue {
@@ -206,38 +217,61 @@ impl InputQueue {
         }
     }
     pub fn try_push(&mut self, event: HidEvent) -> Result<(), HidEvent> {
+        self.try_push_at(event, Instant::now()).map(|_| ())
+    }
+    /// Returns true when an adjacent motion sample was replaced.
+    pub fn try_push_at(&mut self, event: HidEvent, now: Instant) -> Result<bool, HidEvent> {
         if matches!(
             event,
             HidEvent::Touch {
                 phase: TouchPhase::Move,
                 ..
             }
-        ) && let Some(
-            last @ HidEvent::Touch {
-                phase: TouchPhase::Move,
-                ..
-            },
-        ) = self.events.back_mut()
+        ) && let Some(last) = self.events.back_mut()
+            && matches!(
+                last.event,
+                HidEvent::Touch {
+                    phase: TouchPhase::Move,
+                    ..
+                }
+            )
         {
-            *last = event;
-            return Ok(());
+            last.event = event;
+            last.enqueued_at = now;
+            return Ok(true);
         }
         if self.events.len() == self.limit {
             return Err(event);
         }
-        self.events.push_back(event);
-        Ok(())
+        self.events.push_back(QueuedInput {
+            event,
+            enqueued_at: now,
+            retained_since: now,
+        });
+        Ok(false)
     }
     pub fn pop(&mut self) -> Option<HidEvent> {
+        self.pop_timed().map(|queued| queued.event)
+    }
+    pub fn pop_timed(&mut self) -> Option<QueuedInput> {
         self.events.pop_front()
+    }
+    pub fn len(&self) -> usize {
+        self.events.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty()
     }
     /// Cancel pending game touches without replaying stale coordinates. Keep
     /// keyboard/Home transitions, but release dispatched touches before them
     /// or any subsequent touch. Report a full non-touch queue to the caller.
     pub fn cancel_touches(&mut self, timestamp: u64) -> Result<(), HidEvent> {
-        self.events.retain(|event| {
+        self.cancel_touches_at(timestamp, Instant::now())
+    }
+    pub fn cancel_touches_at(&mut self, timestamp: u64, now: Instant) -> Result<(), HidEvent> {
+        self.events.retain(|queued| {
             !matches!(
-                event,
+                queued.event,
                 HidEvent::Touch { .. } | HidEvent::ReleaseTouches { .. }
             )
         });
@@ -245,7 +279,11 @@ impl InputQueue {
         if self.events.len() == self.limit {
             return Err(reset);
         }
-        self.events.push_front(reset);
+        self.events.push_front(QueuedInput {
+            event: reset,
+            enqueued_at: now,
+            retained_since: now,
+        });
         Ok(())
     }
 }
@@ -341,6 +379,44 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn coalescing_updates_snapshot_time_but_preserves_slot_age() {
+        let mut q = InputQueue::new(1);
+        let start = Instant::now();
+        let latest_time = start + std::time::Duration::from_millis(40);
+        let movement = |x| HidEvent::Touch {
+            phase: TouchPhase::Move,
+            report: touchscreen_report(true, x, 100, 0),
+        };
+        assert!(!q.try_push_at(movement(1), start).unwrap());
+        assert!(q.try_push_at(movement(2), latest_time).unwrap());
+        assert_eq!(q.len(), 1);
+        let queued = q.pop_timed().unwrap();
+        assert_eq!(queued.event, movement(2));
+        assert_eq!(queued.enqueued_at, latest_time);
+        assert_eq!(queued.retained_since, start);
+        assert!(q.is_empty());
+    }
+
+    #[test]
+    fn priority_reset_refreshes_its_time_and_preserves_other_event_times() {
+        let mut q = InputQueue::new(3);
+        let start = Instant::now();
+        let later = start + std::time::Duration::from_millis(40);
+        let home = HidEvent::Home { pressed: true };
+        q.try_push_at(home, start).unwrap();
+        q.cancel_touches_at(1, start).unwrap();
+        q.cancel_touches_at(2, later).unwrap();
+        let reset = q.pop_timed().unwrap();
+        assert_eq!(reset.event, HidEvent::ReleaseTouches { timestamp: 2 });
+        assert_eq!(reset.enqueued_at, later);
+        assert_eq!(reset.retained_since, later);
+        let preserved = q.pop_timed().unwrap();
+        assert_eq!(preserved.event, home);
+        assert_eq!(preserved.enqueued_at, start);
+        assert_eq!(preserved.retained_since, start);
+    }
+
     #[test]
     fn move_coalescing_never_overwrites_transitions() {
         let mut q = InputQueue::new(3);

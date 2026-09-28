@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use iphone_mirror_rs::device::{DeviceOptions, DeviceSession, HidChannels, OrientationSource};
-use iphone_mirror_rs::input::{HidEvent, InputQueue, TouchPhase};
+use iphone_mirror_rs::input::{HidEvent, InputQueue, QueuedInput, TouchPhase};
 use iphone_mirror_rs::metrics::Metrics;
 use iphone_mirror_rs::rtp::{HevcDepacketizer, picture_loss_indication, receiver_report};
 use iphone_mirror_rs::video::{DecodeMode, Decoder, LatestFrame};
@@ -15,6 +15,7 @@ use crate::app::AppEvent;
 
 pub struct InputBus {
     queue: Mutex<InputQueue>,
+    metrics: Arc<Metrics>,
     failed: AtomicBool,
     wake: Notify,
     reset: Notify,
@@ -22,9 +23,10 @@ pub struct InputBus {
 }
 
 impl InputBus {
-    pub fn new() -> Self {
+    pub fn new(metrics: Arc<Metrics>) -> Self {
         Self {
             queue: Mutex::new(InputQueue::new(128)),
+            metrics,
             failed: AtomicBool::new(false),
             wake: Notify::new(),
             reset: Notify::new(),
@@ -33,10 +35,22 @@ impl InputBus {
     }
 
     pub fn push(&self, event: HidEvent) -> bool {
-        let success = self
-            .queue
-            .lock()
-            .is_ok_and(|mut queue| queue.try_push(event).is_ok());
+        self.push_at(event, Instant::now())
+    }
+
+    fn push_at(&self, event: HidEvent, now: Instant) -> bool {
+        let success = self.queue.lock().is_ok_and(|mut queue| {
+            let Ok(coalesced) = queue.try_push_at(event, now) else {
+                return false;
+            };
+            if coalesced {
+                self.metrics.input_coalesced.fetch_add(1, Ordering::Relaxed);
+            }
+            self.metrics
+                .input_queue_high_water
+                .fetch_max(queue.len() as u64, Ordering::Relaxed);
+            true
+        });
         if !success {
             self.failed.store(true, Ordering::Release);
         }
@@ -46,12 +60,16 @@ impl InputBus {
 
     #[cfg(test)]
     pub(crate) fn pop(&self) -> Result<Option<HidEvent>> {
-        Ok(self.pop_with_generation()?.map(|(event, _)| event))
+        Ok(self.pop_with_generation()?.map(|(queued, _)| queued.event))
     }
 
     pub fn cancel_game(&self, timestamp: u64) -> bool {
+        let now = Instant::now();
         let success = self.queue.lock().is_ok_and(|mut queue| {
-            let success = queue.cancel_touches(timestamp).is_ok();
+            let success = queue.cancel_touches_at(timestamp, now).is_ok();
+            self.metrics
+                .input_queue_high_water
+                .fetch_max(queue.len() as u64, Ordering::Relaxed);
             self.reset_generation.fetch_add(1, Ordering::AcqRel);
             success
         });
@@ -63,7 +81,7 @@ impl InputBus {
         success
     }
 
-    fn pop_with_generation(&self) -> Result<Option<(HidEvent, u64)>> {
+    fn pop_with_generation(&self) -> Result<Option<(QueuedInput, u64)>> {
         if self.failed.load(Ordering::Acquire) {
             bail!("input queue overflow; ending session to release held input");
         }
@@ -72,7 +90,7 @@ impl InputBus {
             .lock()
             .map_err(|_| anyhow::anyhow!("input queue unavailable"))?;
         let generation = self.reset_generation.load(Ordering::Acquire);
-        Ok(queue.pop().map(|event| (event, generation)))
+        Ok(queue.pop_timed().map(|event| (event, generation)))
     }
 }
 
@@ -92,9 +110,18 @@ impl InputSink for HidChannels {
 }
 
 async fn input_worker(
+    hid: impl InputSink,
+    input: Arc<InputBus>,
+    stop: watch::Receiver<bool>,
+) -> Result<()> {
+    input_worker_with_clock(hid, input, stop, Instant::now).await
+}
+
+async fn input_worker_with_clock(
     mut hid: impl InputSink,
     input: Arc<InputBus>,
     mut stop: watch::Receiver<bool>,
+    now: impl Fn() -> Instant + Send,
 ) -> Result<()> {
     let result: Result<()> = async {
         loop {
@@ -103,17 +130,30 @@ async fn input_worker(
                 biased;
                 _ = stop.changed() => break,
                 _ = input.wake.notified() => {
-                    while let Some((event, generation)) = input.pop_with_generation()? {
+                    while let Some((queued, generation)) = input.pop_with_generation()? {
+                        let event = queued.event;
                         if *stop.borrow() { return Ok(()); }
                         if matches!(event, HidEvent::Touch { .. })
                             && input.reset_generation.load(Ordering::Acquire) != generation
                         {
                             continue;
                         }
+                        // The successful write future ends at the local
+                        // transport. It does not acknowledge phone application.
+                        let send = async {
+                            let started = now();
+                            input.metrics.input_queue_age.record(started.duration_since(queued.enqueued_at));
+                            input.metrics.input_slot_age.record(started.duration_since(queued.retained_since));
+                            hid.send(&event).await?;
+                            let completed = now();
+                            input.metrics.input_write.record(completed.duration_since(started));
+                            input.metrics.input_enqueue_to_write_complete.record(completed.duration_since(queued.enqueued_at));
+                            Ok::<(), anyhow::Error>(())
+                        };
                         tokio::select! {
                             biased;
                             _ = stop.changed() => return Ok(()),
-                            sent = tokio::time::timeout(Duration::from_secs(2), hid.send(&event)) => {
+                            sent = tokio::time::timeout(Duration::from_secs(2), send) => {
                                 sent.context("input send deadline exceeded")??;
                             }
                         }
@@ -268,7 +308,18 @@ async fn orientation_worker(
 struct EncodedFrame {
     bytes: Vec<u8>,
     received_at: Instant,
+    handoff_at: Instant,
     reset: bool,
+}
+
+impl EncodedFrame {
+    fn record_handoff(&self, metrics: &Metrics, dequeued_at: Instant) {
+        // Starts immediately before bounded send: capacity wait + channel
+        // residency only, not network, depacketization, or decoder execution.
+        metrics
+            .encoded_handoff
+            .record(dequeued_at.duration_since(self.handoff_at));
+    }
 }
 
 pub struct SessionShared {
@@ -351,6 +402,7 @@ pub async fn run(
     let proxy = shared.proxy.clone();
     let decode = tokio::task::spawn_blocking(move || -> Result<()> {
         while let Some(packet) = encoded_rx.blocking_recv() {
+            packet.record_handoff(&metrics, Instant::now());
             if packet.reset {
                 decoder.reset();
             }
@@ -437,7 +489,7 @@ pub async fn run(
                     bytes.clear();
                     bytes.extend_from_slice(au.data);
                     tokio::time::timeout(Duration::from_millis(100), encoded_tx.send(EncodedFrame {
-                        bytes, received_at: last_packet, reset: reset_pending,
+                        bytes, received_at: last_packet, handoff_at: Instant::now(), reset: reset_pending,
                     })).await.context("decoder stalled; bounded packet handoff timed out")?
                         .context("decoder worker ended")?;
                     reset_pending = false;
@@ -488,6 +540,72 @@ pub async fn run(
 mod input_tests {
     use super::*;
 
+    #[tokio::test]
+    async fn input_metrics_follow_retained_snapshot_and_successful_write_boundaries() -> Result<()>
+    {
+        let metrics = Arc::new(Metrics::default());
+        let bus = Arc::new(InputBus::new(metrics.clone()));
+        let origin = Instant::now();
+        let clock_ms = Arc::new(AtomicU64::new(40));
+        let motion = HidEvent::Touch {
+            phase: TouchPhase::Move,
+            report: [0; 58],
+        };
+        assert!(bus.push_at(motion, origin));
+        assert!(bus.push_at(motion, origin + Duration::from_millis(10)));
+        assert_eq!(metrics.input_coalesced.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.input_queue_high_water.load(Ordering::Relaxed), 1);
+
+        let (sent, mut received) = mpsc::unbounded_channel();
+        let gate = Arc::new(Notify::new());
+        let closed = Arc::new(AtomicBool::new(false));
+        let sink = RecordedInput {
+            sent,
+            first_send_gate: Some(gate.clone()),
+            closed: closed.clone(),
+        };
+        let (stop, receiver) = watch::channel(false);
+        let clock = clock_ms.clone();
+        let worker = input_worker_with_clock(sink, bus, receiver, move || {
+            origin + Duration::from_millis(clock.load(Ordering::Relaxed))
+        });
+        tokio::pin!(worker);
+        poll_worker_once(worker.as_mut()).await;
+        assert_eq!(received.try_recv()?, motion);
+        assert_eq!(metrics.input_queue_age.samples(), 1);
+        assert_eq!(metrics.input_queue_age.mean_ms(), 30.0);
+        assert_eq!(metrics.input_slot_age.mean_ms(), 40.0);
+        assert_eq!(metrics.input_write.samples(), 0);
+        assert_eq!(metrics.input_enqueue_to_write_complete.samples(), 0);
+
+        clock_ms.store(47, Ordering::Relaxed);
+        gate.notify_one();
+        poll_worker_once(worker.as_mut()).await;
+        assert_eq!(metrics.input_write.samples(), 1);
+        assert_eq!(metrics.input_write.mean_ms(), 7.0);
+        assert_eq!(metrics.input_enqueue_to_write_complete.samples(), 1);
+        assert_eq!(metrics.input_enqueue_to_write_complete.mean_ms(), 37.0);
+        stop.send(true)?;
+        worker.await?;
+        assert!(closed.load(Ordering::Acquire));
+        Ok(())
+    }
+
+    #[test]
+    fn encoded_handoff_excludes_receive_and_assembly_time() {
+        let metrics = Metrics::default();
+        let origin = Instant::now();
+        let packet = EncodedFrame {
+            bytes: Vec::new(),
+            received_at: origin,
+            handoff_at: origin + Duration::from_millis(80),
+            reset: false,
+        };
+        packet.record_handoff(&metrics, origin + Duration::from_millis(100));
+        assert_eq!(metrics.encoded_handoff.samples(), 1);
+        assert_eq!(metrics.encoded_handoff.mean_ms(), 20.0);
+    }
+
     struct RecordedInput {
         sent: mpsc::UnboundedSender<HidEvent>,
         first_send_gate: Option<Arc<Notify>>,
@@ -518,7 +636,8 @@ mod input_tests {
     }
 
     async fn cancel_backlog(inflight: bool) -> Result<()> {
-        let bus = Arc::new(InputBus::new());
+        let metrics = Arc::new(Metrics::default());
+        let bus = Arc::new(InputBus::new(metrics.clone()));
         let report = iphone_mirror_rs::input::touchscreen_report(true, 100, 200, 1);
         let anchor = HidEvent::Touch {
             phase: TouchPhase::AnchorBegin,
@@ -575,6 +694,11 @@ mod input_tests {
         worker.await?;
         assert!(closed.load(Ordering::Acquire));
         assert!(received.recv().await.is_none());
+        // Discarded queued snapshots are not dispatch samples. Both cases send
+        // the original anchor, reset, Home, keyboard, and the new anchor only.
+        assert_eq!(metrics.input_queue_age.samples(), 5);
+        assert_eq!(metrics.input_write.samples(), 5);
+        assert_eq!(metrics.input_queue_high_water.load(Ordering::Relaxed), 42);
         Ok(())
     }
 
@@ -605,7 +729,7 @@ mod input_tests {
     }
 
     async fn queued_dispatch(first_phase: TouchPhase, cancel_during_dwell: bool) -> Result<()> {
-        let bus = Arc::new(InputBus::new());
+        let bus = Arc::new(InputBus::new(Arc::new(Metrics::default())));
         let report = iphone_mirror_rs::input::touchscreen_report(true, 100, 200, 1);
         for phase in [first_phase, TouchPhase::Move] {
             assert!(bus.push(HidEvent::Touch { phase, report }));
@@ -655,7 +779,7 @@ mod input_tests {
 
     #[test]
     fn overflowing_transitions_fail_session_instead_of_dropping_release() {
-        let bus = InputBus::new();
+        let bus = InputBus::new(Arc::new(Metrics::default()));
         for i in 0..128 {
             assert!(bus.push(HidEvent::Home {
                 pressed: i % 2 == 0
@@ -689,7 +813,8 @@ mod input_tests {
 
     #[tokio::test]
     async fn cancel_interrupts_blocked_input_and_releases_it() -> Result<()> {
-        let bus = Arc::new(InputBus::new());
+        let metrics = Arc::new(Metrics::default());
+        let bus = Arc::new(InputBus::new(metrics.clone()));
         let started = Arc::new(Notify::new());
         let closed = Arc::new(AtomicBool::new(false));
         let sink = FakeInput {
@@ -708,12 +833,16 @@ mod input_tests {
         stop.send(true)?;
         tokio::time::timeout(Duration::from_secs(1), worker).await???;
         assert!(closed.load(Ordering::Acquire));
+        assert_eq!(metrics.input_queue_age.samples(), 1);
+        assert_eq!(metrics.input_write.samples(), 0);
+        assert_eq!(metrics.input_enqueue_to_write_complete.samples(), 0);
         Ok(())
     }
 
     #[tokio::test]
     async fn input_write_failure_still_runs_cleanup() -> Result<()> {
-        let bus = Arc::new(InputBus::new());
+        let metrics = Arc::new(Metrics::default());
+        let bus = Arc::new(InputBus::new(metrics.clone()));
         let closed = Arc::new(AtomicBool::new(false));
         let sink = FakeInput {
             started: Arc::new(Notify::new()),
@@ -730,12 +859,15 @@ mod input_tests {
             "synthetic input write failure"
         );
         assert!(closed.load(Ordering::Acquire));
+        assert_eq!(metrics.input_queue_age.samples(), 1);
+        assert_eq!(metrics.input_write.samples(), 0);
+        assert_eq!(metrics.input_enqueue_to_write_complete.samples(), 0);
         Ok(())
     }
 
     #[tokio::test]
     async fn input_overflow_still_runs_cleanup() -> Result<()> {
-        let bus = Arc::new(InputBus::new());
+        let bus = Arc::new(InputBus::new(Arc::new(Metrics::default())));
         for _ in 0..129 {
             bus.push(HidEvent::Home { pressed: true });
         }

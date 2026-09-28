@@ -7,6 +7,10 @@ frame rate does not by itself establish low end-to-end latency.
 
 ## Current evidence
 
+For the newer input/presentation instrumentation and reproducible comparisons,
+see [Smoothness comparisons](#smoothness-comparisons). The historical results
+below remain tied to their original revisions.
+
 Release validation at revision `91b2808` on 2026-09-27 (Pacific), using an iPhone 15/iOS 27,
 1184×2576 HEVC, direct CUDA/NVDEC, AMD Radeon 890M Vulkan rendering and Immediate
 presentation on the physical Hyprland desktop:
@@ -201,3 +205,80 @@ download storage and reuses textures until dimensions or layout change. That
 does not make the whole pipeline allocation-free. Hardware decode still crosses
 a download/upload boundary. Optimize the dominant measured stage, then repeat a
 clean timing run before making an improvement claim.
+
+## Smoothness comparisons
+
+The [research report](smoothness-research.md) records evidence at `f1958b5`.
+The implementation following it adds bounded mouse-vector segmentation,
+content-free timing counters and explicit presentation experiments. It does not
+implement filtering, prediction, a jitter buffer, zero-copy interop, upstream
+tunnel queue changes or source-rate negotiation.
+
+Presentation defaults preserve the earlier policy: `--present-mode auto`
+prefers Immediate, Mailbox, then FIFO; `--frame-latency 1` requests the backend's
+low queue-depth hint; `--pre-present-notify off` preserves existing redraw
+scheduling. Explicit unsupported modes fail instead of silently falling back.
+The notify switch calls winit immediately before successful presentation; its
+Wayland frame-callback scheduling may improve or worsen cadence. A requested
+frame latency is not measured latency, and Immediate does not prove physical
+tearing. Presentation experiments require a window.
+
+Start with the device-free fixture in an isolated desktop:
+
+```sh
+./target/release/examples/render_fixture --animate --fps 60 --frames 180 \
+  --present-mode auto --frame-latency 1 --pre-present-notify off
+```
+
+Build it with `cargo build --release --locked --example render_fixture`.
+Then change **one** flag per run: explicit Mailbox or FIFO, notify on, or frame
+latency 2. Log the actual renderer/mode and elapsed run time. The fixture's
+target rate is not a guarantee that the compositor presents at that rate.
+Its first-picture default remains useful for screenshot comparisons.
+
+For live comparisons, keep the same training scene, profile, decoder, transport
+and desktop conditions. A bounded example, after the phone is ready:
+
+```sh
+./target/release/iphone-mirror-rs --connection wifi \
+  --game-profile ~/.config/iphone-mirror-rs/rainbow-six.profile \
+  --duration 60 --trace /tmp/mirror-baseline-unique.log \
+  --present-mode auto --frame-latency 1 --pre-present-notify off
+```
+
+Use a new trace path for every run. Enter game mode only in the calibrated
+training HUD. Check slow tracking, flicks, stop/reverse, short WASD changes,
+movement with look and each lean, fire/ADS combinations, then Escape with
+controls held. Check the phone's behavior separately from the mirrored video.
+Repeat A/B runs and return to baseline; do not change monitor refresh or phone
+settings midway through a presentation comparison.
+
+### New counter boundaries
+
+Stage logs are cumulative, content-free histograms with `samples`, `mean_ms`,
+`p95_ms`, and `p99_ms`. Percentiles use 1 ms bucket upper edges; 256 means the
+overflow bucket (at least 255 ms), not an exact value. Concurrent snapshots are
+approximate. Zero samples means unobserved, not zero latency.
+
+| Counter or stage | Boundary |
+| --- | --- |
+| `look_resets` | Look lifts/reanchors, excluding the initial contact |
+| `clipped_mouse_events` | Callbacks with rejected/remaining motion after the eight-segment bound, invalid input or blocked edge calibration; not a count of raw units lost |
+| `input_queue_high_water` | Maximum queued report count in the application input queue; excludes an in-flight write and dependency queues |
+| `input_coalesced` | Adjacent Move snapshots replaced by newer snapshots |
+| `input_queue_age` | Latest retained snapshot enqueue → local write start |
+| `input_slot_age` | Original queue-slot enqueue → write start, retaining earlier age across coalescing |
+| `input_write` | Successful local HID write duration; excludes failed/cancelled completions and does not acknowledge game application |
+| `input_enqueue_to_write_complete` | Latest retained snapshot enqueue → successful local write completion |
+| `encoded_handoff` | Complete AU's pre-send timestamp → decoder dequeue; includes capacity wait and channel residency, excludes assembly/network/decode |
+| `upload` | Host texture creation/write enqueue portion; not GPU upload execution |
+| `surface_acquire` | Surface acquisition, including one reconfigure/reacquire where needed |
+| `render_submit` | Whole nonfatal host render attempt; includes timeout attempts, not GPU completion |
+| `submit_interval` | Spacing between successful submissions of new pictures; excludes retained-picture UI redraws |
+| `render_attempts` / `surface_timeouts` | Nonfatal render attempts / acquisition timeouts |
+
+The submission counter now retains an unsubmitted picture's pending status
+after a timeout, so a later successful retry counts once. Repeated UI redraws
+do not count as fresh video. Existing stage metrics remain host observations;
+none establishes actual presentation or input-to-photon latency. Lower-level
+jktcp queue ages and optical/Wayland presentation feedback remain future work.

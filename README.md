@@ -120,6 +120,13 @@ Trace files must not already exist. `--serial ID` selects among saved devices;
 `--address IP:PORT` supplies a known Wi-Fi pairing endpoint when discovery is
 unavailable. `--headless` tests transport/decoding without a window.
 
+For controlled presentation comparisons, use `--present-mode auto|immediate|mailbox|fifo`,
+`--frame-latency 1|2`, and `--pre-present-notify on|off`. Defaults remain `auto`,
+`1`, `off`; an explicitly unsupported mode fails instead of silently falling
+back. These are experiments, not guaranteed latency improvements. See the
+[test procedure](docs/performance.md#smoothness-comparisons) and the
+[primary-source research](docs/smoothness-research.md).
+
 ## Troubleshooting
 
 | Symptom | Check |

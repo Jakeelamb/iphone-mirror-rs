@@ -23,6 +23,10 @@ impl Default for Histogram {
 }
 
 impl Histogram {
+    pub fn samples(&self) -> u64 {
+        self.count.load(Ordering::Relaxed)
+    }
+
     pub fn record(&self, elapsed: Duration) {
         let us = elapsed.as_micros().min(u128::from(u64::MAX)) as u64;
         let bucket = (us / 1000).min((BUCKETS - 1) as u64) as usize;
@@ -66,6 +70,29 @@ pub struct Metrics {
     pub decoded: AtomicU64,
     pub replaced: AtomicU64,
     pub submitted: AtomicU64,
+    pub render_attempts: AtomicU64,
+    pub surface_timeouts: AtomicU64,
+    pub look_resets: AtomicU64,
+    pub clipped_mouse_events: AtomicU64,
+    pub input_queue_high_water: AtomicU64,
+    pub input_coalesced: AtomicU64,
+    /// Latest retained input snapshot enqueue to local HID write start.
+    pub input_queue_age: Histogram,
+    /// Age of its queue slot, including any replaced motion snapshots.
+    pub input_slot_age: Histogram,
+    /// Successful local HID write duration; not a device acknowledgment.
+    pub input_write: Histogram,
+    pub input_enqueue_to_write_complete: Histogram,
+    /// Access-unit handoff attempt to decoder dequeue. Includes waiting for
+    /// bounded channel capacity, but excludes assembly and upstream queues.
+    pub encoded_handoff: Histogram,
+    /// Host texture write enqueue, including texture allocation when needed.
+    pub upload: Histogram,
+    pub surface_acquire: Histogram,
+    /// Host render attempt duration, not GPU execution or display scanout.
+    pub render_submit: Histogram,
+    /// Distinct-frame successful submission spacing, excluding UI-only redraws.
+    pub submit_interval: Histogram,
     pub decode: Histogram,
     pub receive_to_submit: Histogram,
     pub source_to_submit: Histogram,
@@ -130,6 +157,40 @@ impl Metrics {
             source_to_submit_p95_ms = self.source_to_submit.percentile_ms(95),
             "pipeline counters; submission is not display scanout"
         );
+        tracing::info!(
+            input_queue_high_water = self.input_queue_high_water.load(Ordering::Relaxed),
+            input_coalesced = self.input_coalesced.load(Ordering::Relaxed),
+            look_resets = self.look_resets.load(Ordering::Relaxed),
+            clipped_mouse_events = self.clipped_mouse_events.load(Ordering::Relaxed),
+            render_attempts = self.render_attempts.load(Ordering::Relaxed),
+            surface_timeouts = self.surface_timeouts.load(Ordering::Relaxed),
+            "bounded input and render counters"
+        );
+        // Each event has a fixed label and numeric fields only. Histograms use
+        // 1 ms bucket upper edges; 256 is overflow (>=255 ms), not an exact age.
+        for (stage, histogram) in [
+            ("input_queue_age", &self.input_queue_age),
+            ("input_slot_age", &self.input_slot_age),
+            ("input_write", &self.input_write),
+            (
+                "input_enqueue_to_write_complete",
+                &self.input_enqueue_to_write_complete,
+            ),
+            ("encoded_handoff", &self.encoded_handoff),
+            ("upload", &self.upload),
+            ("surface_acquire", &self.surface_acquire),
+            ("render_submit", &self.render_submit),
+            ("submit_interval", &self.submit_interval),
+        ] {
+            tracing::info!(
+                stage,
+                samples = histogram.samples(),
+                mean_ms = histogram.mean_ms(),
+                p95_ms = histogram.percentile_ms(95),
+                p99_ms = histogram.percentile_ms(99),
+                "host stage timing; write completion is not phone application or scanout"
+            );
+        }
     }
 }
 
@@ -140,6 +201,7 @@ mod tests {
     #[test]
     fn percentiles_cover_empty_bucket_edges_and_overflow() {
         let h = Histogram::default();
+        assert_eq!(h.samples(), 0);
         assert_eq!(h.percentile_ms(95), 0);
         for us in [0, 999, 1000, 2000, 999_999] {
             h.record(Duration::from_micros(us));
@@ -147,6 +209,7 @@ mod tests {
         assert_eq!(h.percentile_ms(40), 1);
         assert_eq!(h.percentile_ms(50), 2);
         assert_eq!(h.percentile_ms(100), 256);
+        assert_eq!(h.samples(), 5);
         assert!((h.mean_ms() - 200.7996).abs() < 0.0001);
     }
 }
