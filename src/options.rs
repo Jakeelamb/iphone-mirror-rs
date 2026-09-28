@@ -35,7 +35,7 @@ impl Options {
             match arg.as_str() {
                 "--help" | "-h" => {
                     println!(
-                        "iphone-mirror-rs\n\nNative iPhone video and input. Requires an already paired, unlocked iPhone.\n\n  --connection auto|usb|wifi  Transport (default auto)\n  --address IP:PORT           Explicit Wi-Fi endpoint\n  --pairing-file PATH         Existing CoreDevice pairing record\n  --serial ID                 Select one paired device\n  --software                 Force software HEVC decoding\n  --headless                 Decode and trace without opening a window\n  --duration SECONDS         Stop after a bounded validation run\n  --trace PATH               Write timing/counter traces to a new file\n\nControls: click/drag, wheel, keyboard; F1 Home; F2 Spotlight.\nClosing the window releases input and stops the stream."
+                        "iphone-mirror-rs\n\nNative iPhone video and input. Requires an already paired, unlocked iPhone.\n\n  --connection auto|usb|wifi  Transport (default auto)\n  --address IP:PORT           Explicit Wi-Fi endpoint\n  --pairing-file PATH         Existing CoreDevice pairing record\n  --serial ID                 Select one paired device\n  --software                 Force software HEVC decoding\n  --headless                 Decode and trace without opening a window\n  --duration SECONDS         Stop after a bounded validation run\n  --trace PATH               Write timing/counter traces to a new file\n  --measure-stamp            Measure synthetic latency-page frame timestamps\n\nControls: click/drag, wheel, keyboard; F1 Home; F2 Spotlight.\nClosing the window releases input and stops the stream."
                     );
                     return Ok(None);
                 }
