@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use iphone_mirror_rs::device::{DeviceOptions, DeviceSession, HidChannels};
+use iphone_mirror_rs::device::{DeviceOptions, DeviceSession, HidChannels, OrientationSource};
 use iphone_mirror_rs::input::{HidEvent, InputQueue};
 use iphone_mirror_rs::metrics::Metrics;
 use iphone_mirror_rs::rtp::{HevcDepacketizer, picture_loss_indication, receiver_report};
@@ -126,6 +126,100 @@ impl DecodeProgress {
     }
 }
 
+const ORIENTATION_POLL_INTERVAL: Duration = Duration::from_millis(400);
+
+trait OrientationPoll: Send + 'static {
+    fn poll(&mut self) -> impl std::future::Future<Output = Result<u32>> + Send;
+    fn reset(&mut self);
+}
+
+impl OrientationPoll for OrientationSource {
+    async fn poll(&mut self) -> Result<u32> {
+        OrientationSource::poll(self).await
+    }
+    fn reset(&mut self) {
+        OrientationSource::reset(self);
+    }
+}
+
+struct OrientationState {
+    last: Option<u32>,
+    delay: Duration,
+    failed: bool,
+}
+
+impl Default for OrientationState {
+    fn default() -> Self {
+        Self {
+            last: None,
+            delay: ORIENTATION_POLL_INTERVAL,
+            failed: false,
+        }
+    }
+}
+
+impl OrientationState {
+    fn success(&mut self, value: u32) -> Option<u32> {
+        self.delay = ORIENTATION_POLL_INTERVAL;
+        self.failed = false;
+        if (1..=4).contains(&value) && self.last != Some(value) {
+            self.last = Some(value);
+            Some(value)
+        } else {
+            None
+        }
+    }
+
+    fn failure(&mut self) -> bool {
+        self.delay = (self.delay * 2).min(Duration::from_secs(5));
+        let first = !self.failed;
+        self.failed = true;
+        first
+    }
+}
+
+async fn orientation_worker(
+    mut source: impl OrientationPoll,
+    mut stop: watch::Receiver<bool>,
+    mut emit: impl FnMut(u32) -> bool,
+) {
+    let mut state = OrientationState::default();
+    loop {
+        if *stop.borrow() {
+            break;
+        }
+        let outcome = tokio::select! {
+            biased;
+            _ = stop.changed() => break,
+            outcome = tokio::time::timeout(Duration::from_secs(1), source.poll()) => outcome,
+        };
+        match outcome {
+            Ok(Ok(value)) => {
+                if let Some(value) = state.success(value) {
+                    tracing::info!(orientation = value, "device interface orientation changed");
+                    if !emit(value) {
+                        break;
+                    }
+                }
+            }
+            _ => {
+                source.reset();
+                if state.failure() {
+                    tracing::warn!(
+                        "interface orientation query failed; retrying independently of video"
+                    );
+                }
+            }
+        }
+        tokio::select! {
+            biased;
+            _ = stop.changed() => break,
+            _ = tokio::time::sleep(state.delay) => {},
+        }
+    }
+    // Dropping the source closes its dedicated SpringBoard service stream.
+}
+
 struct EncodedFrame {
     bytes: Vec<u8>,
     received_at: Instant,
@@ -177,8 +271,33 @@ pub async fn run(
     }
 
     let (input_stop, input_stop_rx) = watch::channel(false);
-    let mut input_task = tokio::spawn(input_worker(hid, shared.input.clone(), input_stop_rx));
+    let mut input_task = tokio::spawn(input_worker(
+        hid,
+        shared.input.clone(),
+        input_stop_rx.clone(),
+    ));
     let mut input_result = None;
+    let orientation_task =
+        shared
+            .proxy
+            .clone()
+            .and_then(|proxy| match session.orientation_source() {
+                Ok(source) => Some(tokio::spawn(orientation_worker(
+                    source,
+                    input_stop_rx,
+                    move |value| {
+                        proxy
+                            .send_event(AppEvent::OrientationChanged(value))
+                            .is_ok()
+                    },
+                ))),
+                Err(_) => {
+                    tracing::warn!(
+                        "interface orientation service unavailable; video remains active"
+                    );
+                    None
+                }
+            });
 
     let (encoded_tx, mut encoded_rx) = mpsc::channel::<EncodedFrame>(4);
     let (free_tx, mut free_rx) = mpsc::channel::<Vec<u8>>(6);
@@ -300,6 +419,17 @@ pub async fn run(
             }
         },
     };
+    if let Some(mut orientation_task) = orientation_task {
+        match tokio::time::timeout(Duration::from_secs(2), &mut orientation_task).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => tracing::warn!("orientation task ended unexpectedly"),
+            Err(_) => {
+                orientation_task.abort();
+                let _ = orientation_task.await;
+                tracing::warn!("orientation task shutdown deadline exceeded");
+            }
+        }
+    }
     let stream_cleanup = tokio::time::timeout(Duration::from_secs(5), session.stop()).await;
     let decoder_result = decode.await.context("decoder thread failed")?;
     shared.metrics.report();
@@ -452,5 +582,102 @@ mod input_tests {
             progress.observe(start + Duration::from_secs(22), 3, 1),
             Duration::ZERO
         );
+    }
+
+    #[test]
+    fn orientation_keeps_last_valid_value_and_deduplicates_changes() {
+        let mut state = OrientationState::default();
+        assert_eq!(state.success(1), Some(1));
+        assert_eq!(state.success(1), None);
+        assert_eq!(state.success(0), None);
+        assert_eq!(state.success(5), None);
+        assert_eq!(state.last, Some(1));
+        for value in [2, 3, 4] {
+            assert_eq!(state.success(value), Some(value));
+        }
+        assert_eq!(state.success(4), None);
+    }
+
+    #[test]
+    fn orientation_retry_backoff_is_bounded_and_resets_after_success() {
+        let mut state = OrientationState::default();
+        assert!(state.failure());
+        assert_eq!(state.delay, Duration::from_millis(800));
+        for _ in 0..20 {
+            assert!(!state.failure());
+        }
+        assert_eq!(state.delay, Duration::from_secs(5));
+        assert_eq!(state.success(1), Some(1));
+        assert_eq!(state.delay, ORIENTATION_POLL_INTERVAL);
+        assert!(state.failure());
+    }
+
+    struct FakeOrientation {
+        started: Arc<Notify>,
+        resets: Arc<std::sync::atomic::AtomicUsize>,
+        dropped: Arc<AtomicBool>,
+        answers: std::collections::VecDeque<Result<u32>>,
+    }
+
+    impl OrientationPoll for FakeOrientation {
+        async fn poll(&mut self) -> Result<u32> {
+            self.started.notify_one();
+            match self.answers.pop_front() {
+                Some(answer) => answer,
+                None => std::future::pending().await,
+            }
+        }
+        fn reset(&mut self) {
+            self.resets.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    impl Drop for FakeOrientation {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::Release);
+        }
+    }
+
+    #[tokio::test]
+    async fn orientation_cancel_drops_blocked_service_without_waiting_for_timeout() -> Result<()> {
+        let started = Arc::new(Notify::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let source = FakeOrientation {
+            started: started.clone(),
+            resets: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            dropped: dropped.clone(),
+            answers: std::collections::VecDeque::new(),
+        };
+        let (stop, receiver) = watch::channel(false);
+        let task = tokio::spawn(orientation_worker(source, receiver, |_| true));
+        tokio::time::timeout(Duration::from_secs(1), started.notified()).await?;
+        stop.send(true)?;
+        tokio::time::timeout(Duration::from_millis(250), task).await??;
+        assert!(dropped.load(Ordering::Acquire));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn orientation_failure_discards_service_then_recovers() -> Result<()> {
+        let resets = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let source = FakeOrientation {
+            started: Arc::new(Notify::new()),
+            resets: resets.clone(),
+            dropped: dropped.clone(),
+            answers: [Err(anyhow::anyhow!("synthetic query failure")), Ok(3)]
+                .into_iter()
+                .collect(),
+        };
+        let (_stop, receiver) = watch::channel(false);
+        let (sent, mut received) = mpsc::unbounded_channel();
+        let task = tokio::spawn(orientation_worker(source, receiver, move |value| {
+            let _ = sent.send(value);
+            false // A closed UI ends polling and releases the dedicated service.
+        }));
+        tokio::time::timeout(Duration::from_secs(2), task).await??;
+        assert_eq!(received.try_recv()?, 3);
+        assert_eq!(resets.load(Ordering::Relaxed), 1);
+        assert!(dropped.load(Ordering::Acquire));
+        Ok(())
     }
 }

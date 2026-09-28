@@ -1,6 +1,8 @@
 //! Native authenticated CoreDevice tunnel. Never creates or modifies pairing records.
 mod offer;
+mod orientation;
 mod pairing;
+pub use orientation::OrientationSource;
 
 use anyhow::{Context, Result, bail};
 use idevice::{
@@ -87,6 +89,17 @@ impl VideoStream {
 }
 
 impl DeviceSession {
+    /// Clone only the transport handle; connection and queries happen in the
+    /// independent orientation task, never in the video receive loop.
+    pub fn orientation_source(&self) -> Result<OrientationSource> {
+        let service = self
+            .handshake
+            .services
+            .get("com.apple.springboardservices.shim.remote")
+            .context("interface orientation service is not advertised")?;
+        Ok(OrientationSource::new(self.adapter.clone(), service.port))
+    }
+
     pub async fn connect(options: &DeviceOptions) -> Result<Self> {
         let usb = if options.connection != ConnectionMode::Wifi && options.address.is_none() {
             match timeout(CONNECT_TIMEOUT, connect_usb(options.serial.as_deref())).await {

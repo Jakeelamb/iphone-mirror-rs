@@ -13,7 +13,7 @@ ed25519-dalek = "2"
 ffmpeg-sys-next = { version = "8", default-features = false, features = ["avcodec"] }
 flate2 = "1"
 libc = "0.2"
-idevice = { git = "https://github.com/jkcoxson/idevice", rev = "d32c8189c51c2789496b0768039419c3705498c3", default-features = false, features = ["ring", "usbmuxd", "tcp", "tunnel_tcp_stack", "core_device_proxy", "remote_pairing", "display_stream", "mdns"] }
+idevice = { git = "https://github.com/jkcoxson/idevice", rev = "d32c8189c51c2789496b0768039419c3705498c3", default-features = false, features = ["ring", "usbmuxd", "tcp", "tunnel_tcp_stack", "core_device_proxy", "remote_pairing", "display_stream", "mdns", "springboardservices"] }
 mdns-sd = "0.17"
 plist = "1"
 pollster = "0.4"
