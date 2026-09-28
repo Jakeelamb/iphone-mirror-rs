@@ -35,7 +35,7 @@ impl Options {
             match arg.as_str() {
                 "--help" | "-h" => {
                     println!(
-                        "iphone-mirror-rs\n\nNative iPhone video and input. Requires an already paired, unlocked iPhone.\n\n  --connection auto|usb|wifi  Transport (default auto)\n  --address IP:PORT           Explicit Wi-Fi endpoint\n  --pairing-file PATH         Existing CoreDevice pairing record\n  --serial ID                 Select one paired device\n  --software                 Force software HEVC decoding\n  --headless                 Decode and trace without opening a window\n  --duration SECONDS         Stop after a bounded validation run\n  --trace PATH               Write timing/counter traces to a new file\n  --measure-stamp            Measure synthetic latency-page frame timestamps\n\nControls: click/drag, wheel, keyboard; F1 Home; F2 Spotlight.\nClosing the window releases input and stops the stream."
+                        "iphone-mirror-rs\n\nNative iPhone video and input. Requires an already paired, unlocked iPhone.\n\n  --connection auto|usb|wifi  Transport (default auto)\n  --address IP:PORT           Explicit Wi-Fi endpoint\n  --pairing-file PATH         Existing CoreDevice pairing record\n  --serial ID                 Select one paired device\n  --decoder auto|cuda|vaapi|software  Decoder preference (default auto)\n  --software                 Alias for --decoder software\n  --headless                 Decode and trace without opening a window\n  --duration SECONDS         Stop after a bounded validation run\n  --trace PATH               Write timing/counter traces to a new file\n  --measure-stamp            Measure synthetic latency-page frame timestamps\n\nControls: click/drag, wheel, keyboard; F1 Home; F2 Spotlight.\nClosing the window releases input and stops the stream."
                     );
                     return Ok(None);
                 }
@@ -63,6 +63,15 @@ impl Options {
                 "--serial" => {
                     options.device.serial =
                         Some(args.next().context("--serial requires an identifier")?)
+                }
+                "--decoder" => {
+                    options.decoder = match args.next().as_deref() {
+                        Some("auto") => DecodeMode::Auto,
+                        Some("cuda") => DecodeMode::Cuda,
+                        Some("vaapi") => DecodeMode::Vaapi,
+                        Some("software") => DecodeMode::Software,
+                        _ => bail!("--decoder requires auto, cuda, vaapi or software"),
+                    };
                 }
                 "--software" => options.decoder = DecodeMode::Software,
                 "--headless" => options.headless = true,
