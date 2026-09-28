@@ -6,7 +6,8 @@
 use anyhow::{Context, Result, bail};
 use iphone_mirror_rs::metrics::Histogram;
 use iphone_mirror_rs::video::{
-    DecodeMode, DecodedFrame, Decoder, PresentationOptions, Renderer, ViewerLayout, displayed_size,
+    DecodeMode, DecodedFrame, Decoder, PresentationOptions, RenderSample, Renderer, ViewerLayout,
+    displayed_size,
 };
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -31,6 +32,8 @@ struct Fixture {
     presentation: PresentationOptions,
     frame_interval: Duration,
     frame_limit: Option<usize>,
+    pending: bool,
+    replaced: usize,
     submitted: usize,
     acquire: Histogram,
     render: Histogram,
@@ -52,17 +55,44 @@ impl Fixture {
         Ok(())
     }
 
-    fn next(&mut self) -> Result<()> {
+    fn source_finished(&self, now: Instant) -> bool {
+        now >= self.next_frame && self.frame_limit.is_some_and(|limit| self.count >= limit)
+    }
+
+    /// The main-loop timer advances the source even when redraws are throttled.
+    /// A blocked main thread still delays this timer; this is not a producer thread.
+    fn source_tick(&mut self, now: Instant) -> Result<bool> {
+        if now < self.next_frame || self.source_finished(now) {
+            return Ok(false);
+        }
         let picture = self.pictures[self.count % self.pictures.len()];
-        self.decoder.decode(picture, Instant::now(), |frame| {
+        self.decoder.decode(picture, now, |frame| {
+            self.replaced += usize::from(self.pending);
             self.frame = Some(frame);
+            self.pending = true;
         })?;
         self.count += 1;
+        // Preserve the target phase without replaying a burst after a stall.
+        self.next_frame += self.frame_interval;
+        if self.next_frame <= now {
+            self.next_frame = now + self.frame_interval;
+        }
+        Ok(true)
+    }
+
+    fn record_render(&mut self, sample: RenderSample) {
+        self.acquire.record(sample.surface_acquire);
+        self.render.record(sample.total);
+        if sample.submitted_at.is_some() && self.pending {
+            self.pending = false;
+            self.submitted += 1;
+        }
+    }
+
+    fn render_current(&mut self) -> Result<()> {
         if let (Some(renderer), Some(frame)) = (&mut self.renderer, &self.frame) {
             let sample = renderer.render(frame)?;
-            self.acquire.record(sample.surface_acquire);
-            self.render.record(sample.total);
-            self.submitted += usize::from(sample.submitted_at.is_some());
+            self.record_render(sample);
         }
         Ok(())
     }
@@ -134,11 +164,8 @@ impl ApplicationHandler for Fixture {
                 self.button_feedback();
             }
             WindowEvent::RedrawRequested => {
-                if let Err(error) = self.next() {
+                if let Err(error) = self.render_current() {
                     self.fail(event_loop, error);
-                }
-                if self.frame_limit.is_some_and(|limit| self.count >= limit) {
-                    event_loop.exit();
                 }
             }
             _ => {}
@@ -146,15 +173,23 @@ impl ApplicationHandler for Fixture {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if Instant::now() >= self.next_frame {
-            if let Some(window) = &self.window {
-                window.request_redraw();
+        let now = Instant::now();
+        // Allow the last source frame one interval to render, then exit even if
+        // occlusion or a compositor callback prevents any further redraw.
+        if self.source_finished(now) {
+            event_loop.exit();
+            return;
+        }
+        match self.source_tick(now) {
+            Ok(true) => {
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
             }
-            // Preserve the target phase without replaying a burst after a stall.
-            let now = Instant::now();
-            self.next_frame += self.frame_interval;
-            if self.next_frame <= now {
-                self.next_frame = now + self.frame_interval;
+            Ok(false) => {}
+            Err(error) => {
+                self.fail(event_loop, error);
+                return;
             }
         }
         event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame));
@@ -264,6 +299,8 @@ fn main() -> Result<()> {
         presentation,
         frame_interval: Duration::from_secs_f64(1.0 / f64::from(fps)),
         frame_limit,
+        pending: false,
+        replaced: 0,
         submitted: 0,
         acquire: Histogram::default(),
         render: Histogram::default(),
@@ -277,6 +314,8 @@ fn main() -> Result<()> {
     tracing::info!(
         frames = app.count,
         submitted = app.submitted,
+        replaced = app.replaced,
+        pending = app.pending,
         acquire_p95_ms = app.acquire.percentile_ms(95),
         render_mean_ms = app.render.mean_ms(),
         "synthetic fixture closed; host timings are not scanout measurements"
@@ -287,6 +326,95 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fixture() -> Result<Fixture> {
+        Ok(Fixture {
+            window: None,
+            renderer: None,
+            decoder: Decoder::new(DecodeMode::Software)?,
+            pictures: pictures(
+                include_bytes!("../src/video/fixtures/motion-256x384.hevc"),
+                true,
+            )?,
+            frame: None,
+            next_frame: Instant::now(),
+            count: 0,
+            error: None,
+            home_hovered: false,
+            home_armed: false,
+            rotation: 0,
+            presentation: PresentationOptions::default(),
+            frame_interval: Duration::from_secs_f64(1.0 / 60.0),
+            frame_limit: Some(3),
+            pending: false,
+            replaced: 0,
+            submitted: 0,
+            acquire: Histogram::default(),
+            render: Histogram::default(),
+        })
+    }
+
+    #[test]
+    fn source_ticks_are_independent_of_ui_redraws_and_finish_without_submission() -> Result<()> {
+        let mut app = fixture()?;
+        let start = app.next_frame;
+        assert!(app.source_tick(start)?);
+        let received_at = app.frame.as_ref().context("decoded frame")?.received_at;
+        for _ in 0..20 {
+            // Exercise the same path as RedrawRequested without opening a GPU surface.
+            app.render_current()?;
+            assert!(!app.source_tick(start)?);
+        }
+        assert_eq!(app.count, 1);
+        assert_eq!(
+            app.frame.as_ref().context("retained frame")?.received_at,
+            received_at
+        );
+        assert!(app.source_tick(start + app.frame_interval)?);
+        assert!(app.source_tick(start + app.frame_interval * 2)?);
+        assert_eq!((app.count, app.replaced, app.submitted), (3, 2, 0));
+        assert!(!app.source_finished(start + app.frame_interval * 2));
+        assert!(app.source_finished(start + app.frame_interval * 3));
+        assert!(!app.source_tick(start + app.frame_interval * 3)?);
+        assert_eq!(app.count, 3);
+        Ok(())
+    }
+
+    #[test]
+    fn submissions_count_distinct_frames_and_timeout_keeps_latest_pending() -> Result<()> {
+        let mut app = fixture()?;
+        let now = app.next_frame;
+        let sample = |submitted_at| RenderSample {
+            submitted_at,
+            upload: Duration::ZERO,
+            surface_acquire: Duration::ZERO,
+            total: Duration::ZERO,
+        };
+        app.source_tick(now)?;
+        app.record_render(sample(None));
+        assert!(app.pending);
+        app.source_tick(now + app.frame_interval)?;
+        assert_eq!(app.replaced, 1);
+        app.record_render(sample(Some(now)));
+        assert!(!app.pending);
+        app.record_render(sample(Some(now)));
+        assert_eq!(app.submitted, 1);
+        app.source_tick(now + app.frame_interval * 2)?;
+        app.record_render(sample(Some(now)));
+        assert_eq!((app.count, app.submitted, app.replaced), (3, 2, 1));
+        Ok(())
+    }
+
+    #[test]
+    fn delayed_timer_skips_burst_without_depending_on_redraw() -> Result<()> {
+        let mut app = fixture()?;
+        let late = app.next_frame + app.frame_interval * 10;
+        assert!(app.source_tick(late)?);
+        assert_eq!(app.count, 1);
+        assert_eq!(app.next_frame, late + app.frame_interval);
+        assert!(!app.source_tick(late)?);
+        Ok(())
+    }
 
     #[test]
     fn selected_picture_decodes_without_waiting_for_another_packet() -> Result<()> {

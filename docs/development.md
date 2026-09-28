@@ -84,8 +84,12 @@ qualify physical GPU performance.
 
 `--animate` loops the complete synthetic sequence; the default repeats its first
 picture for stable screenshots. `--fps 1..240` controls the fixture's target rate
-(default 30), and `--frames N` closes it after N decoded fixture steps. These are
-local synthetic pictures, not phone capture-rate controls. The normal test suite
+(default 30), and `--frames N` closes it one source interval after N fixture
+steps, even if the compositor stops delivering redraws. A main-loop timer
+advances the source; UI redraws only render the retained newest picture.
+Main-thread blocking can still delay that timer. The closing counters distinguish
+source steps, distinct submitted pictures and pictures replaced before submission.
+These are local synthetic pictures, not phone capture-rate controls. The normal test suite
 verifies immediate output and content changes across two complete loops without
 opening a window. All presentation flags use the viewer's shared validation.
 
