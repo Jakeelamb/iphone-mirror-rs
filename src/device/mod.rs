@@ -266,13 +266,11 @@ impl DeviceSession {
 
     pub async fn stop(&mut self) -> Result<()> {
         let stopped = if self.streaming {
+            // Canonical idevice stop request. The server requires stopAll;
+            // session-ID-only and stopAll=false requests are rejected on iOS 27.
+            // Only send this after this session successfully started mirroring.
             let mut params = Dictionary::new();
-            let mut id = Dictionary::new();
-            id.insert("uuid".into(), XPCObject::Uuid(self.session_id));
-            params.insert(
-                "avcMediaStreamOptionClientSessionID".into(),
-                XPCObject::Dictionary(id),
-            );
+            params.insert("stopAll".into(), XPCObject::Bool(true));
             timeout(
                 Duration::from_secs(3),
                 invoke(
@@ -442,82 +440,48 @@ async fn invoke(
     parse_response(response, feature, action)
 }
 
-fn parse_response(response: plist::Value, feature: &str, action: &str) -> Result<plist::Value> {
+fn parse_response(response: plist::Value, _feature: &str, action: &str) -> Result<plist::Value> {
     let dict = response
         .as_dictionary()
         .context("invalid CoreDevice reply")?;
     // Error precedence is deliberate: never turn an explicit device rejection
     // into success because it also contains an output or is a stop request.
-    if dict.contains_key("CoreDevice.error") {
+    if let Some(error) = dict.get("CoreDevice.error") {
+        tracing::warn!(
+            action,
+            code = error_code(error, 0),
+            "device rejected CoreDevice action (payload withheld)"
+        );
         bail!("CoreDevice rejected {action}");
     }
     if let Some(output) = dict.get("CoreDevice.output") {
         return Ok(output.clone());
     }
-    if feature == "stopmediastream" && action == "mediastreamstop" {
-        tracing::debug!("device acknowledged stream stop without an output payload");
-        return Ok(plist::Value::Dictionary(plist::Dictionary::new()));
-    }
     // Device errors can embed names and identifiers; retain only the action here.
     bail!("CoreDevice {action} returned no output")
 }
 
-#[cfg(test)]
-mod response_tests {
-    use super::parse_response;
-    use anyhow::{Context, Result};
-
-    #[test]
-    fn stop_accepts_empty_acknowledgement() -> Result<()> {
-        parse_response(
-            plist::Value::Dictionary(plist::Dictionary::new()),
-            "stopmediastream",
-            "mediastreamstop",
-        )?;
-        Ok(())
+/// Retain only a numeric code; device error descriptions may contain names or IDs.
+fn error_code(value: &plist::Value, depth: usize) -> Option<i64> {
+    if depth > 8 {
+        return None;
     }
-
-    #[test]
-    fn start_still_requires_output() {
-        assert!(
-            parse_response(
-                plist::Value::Dictionary(plist::Dictionary::new()),
-                "startmediastream",
-                "mediastreamstart"
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn stop_never_hides_device_error_or_leaks_payload() -> Result<()> {
-        let mut reply = plist::Dictionary::new();
-        reply.insert("CoreDevice.error".into(), "private device details".into());
-        reply.insert(
-            "CoreDevice.output".into(),
-            plist::Value::Dictionary(plist::Dictionary::new()),
-        );
-        let error = parse_response(
-            plist::Value::Dictionary(reply),
-            "stopmediastream",
-            "mediastreamstop",
-        )
-        .err()
-        .context("explicit device error must fail")?;
-        assert_eq!(error.to_string(), "CoreDevice rejected mediastreamstop");
-        Ok(())
-    }
-
-    #[test]
-    fn malformed_stop_reply_is_not_an_acknowledgement() {
-        assert!(
-            parse_response(
-                plist::Value::String("unexpected".into()),
-                "stopmediastream",
-                "mediastreamstop"
-            )
-            .is_err()
-        );
+    match value {
+        plist::Value::Dictionary(dict) => {
+            for key in ["code", "Code", "errorCode"] {
+                if let Some(code) = dict.get(key).and_then(plist::Value::as_signed_integer) {
+                    return Some(code);
+                }
+            }
+            dict.values()
+                .take(32)
+                .find_map(|value| error_code(value, depth + 1))
+        }
+        plist::Value::Array(values) => values
+            .iter()
+            .take(32)
+            .find_map(|value| error_code(value, depth + 1)),
+        _ => None,
     }
 }
 
@@ -604,4 +568,84 @@ async fn discover() -> Result<Vec<SocketAddr>> {
     let _ = mdns.shutdown();
     addresses.sort_by_key(|a| a.is_ipv6());
     Ok(addresses)
+}
+
+#[cfg(test)]
+mod response_tests {
+    use super::{error_code, parse_response};
+    use anyhow::{Context, Result};
+
+    #[test]
+    fn diagnostic_extracts_only_numeric_codes() {
+        let mut nested = plist::Dictionary::new();
+        nested.insert("code".into(), 4865_i64.into());
+        nested.insert(
+            "description".into(),
+            "private values must stay private".into(),
+        );
+        let mut root = plist::Dictionary::new();
+        root.insert("underlyingError".into(), plist::Value::Dictionary(nested));
+        let value = plist::Value::Dictionary(root);
+        assert_eq!(error_code(&value, 0), Some(4865));
+        assert_eq!(error_code(&value, 9), None);
+        assert_eq!(
+            error_code(&plist::Value::String("4865 private".into()), 0),
+            None
+        );
+    }
+
+    #[test]
+    fn stop_rejects_missing_output_without_assuming_acknowledgement() {
+        assert!(
+            parse_response(
+                plist::Value::Dictionary(plist::Dictionary::new()),
+                "stopmediastream",
+                "mediastreamstop",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn start_still_requires_output() {
+        assert!(
+            parse_response(
+                plist::Value::Dictionary(plist::Dictionary::new()),
+                "startmediastream",
+                "mediastreamstart"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn stop_never_hides_device_error_or_leaks_payload() -> Result<()> {
+        let mut reply = plist::Dictionary::new();
+        reply.insert("CoreDevice.error".into(), "private device details".into());
+        reply.insert(
+            "CoreDevice.output".into(),
+            plist::Value::Dictionary(plist::Dictionary::new()),
+        );
+        let error = parse_response(
+            plist::Value::Dictionary(reply),
+            "stopmediastream",
+            "mediastreamstop",
+        )
+        .err()
+        .context("explicit device error must fail")?;
+        assert_eq!(error.to_string(), "CoreDevice rejected mediastreamstop");
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_stop_reply_is_not_an_acknowledgement() {
+        assert!(
+            parse_response(
+                plist::Value::String("unexpected".into()),
+                "stopmediastream",
+                "mediastreamstop"
+            )
+            .is_err()
+        );
+    }
 }
