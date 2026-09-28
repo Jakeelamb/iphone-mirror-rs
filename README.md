@@ -16,8 +16,9 @@ not yet qualified. Omarchy is not a runtime dependency.
 
 You need Rust **1.96 or newer**, a C compiler, `pkg-config`, Clang/libclang,
 FFmpeg development libraries (`libavcodec` and `libavutil`), and a working Vulkan
-renderer. The tested FFmpeg version is **9.0.1**; other versions are unverified.
-Use [rustup](https://rustup.rs/) if your distribution's Rust is too old.
+renderer. Live phone tests used **FFmpeg 9.0.1**; CI checks builds and software
+decoding against Arch's current FFmpeg package. Other live configurations remain
+unverified. Use [rustup](https://rustup.rs/) if your distribution's Rust is too old.
 
 On Arch Linux/Omarchy:
 
