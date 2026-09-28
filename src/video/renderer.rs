@@ -1,4 +1,5 @@
 use super::frame::{DecodedFrame, Layout};
+use super::layout::ViewerLayout;
 use anyhow::{Context, Result, ensure};
 use std::sync::Arc;
 use std::time::Instant;
@@ -7,9 +8,11 @@ use winit::window::Window;
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Parameters {
-    scale: [f32; 2],
-    nv12: f32,
-    full_range: f32,
+    viewport: [f32; 4],
+    screen: [f32; 4],
+    home: [f32; 4],
+    footer: [f32; 4],
+    style: [f32; 4],
     coefficients: [f32; 4],
 }
 
@@ -24,6 +27,7 @@ struct Textures {
 /// GPU YUV conversion and presentation; textures are recreated only on format
 /// changes. Hardware decode currently includes a CPU download/upload boundary.
 pub struct Renderer {
+    window: Arc<Window>,
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -33,6 +37,8 @@ pub struct Renderer {
     sampler: wgpu::Sampler,
     uniform: wgpu::Buffer,
     textures: Option<Textures>,
+    home_hovered: bool,
+    home_pressed: bool,
 }
 
 impl Renderer {
@@ -40,7 +46,7 @@ impl Renderer {
         let size = window.inner_size();
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
         let surface = instance
-            .create_surface(window)
+            .create_surface(window.clone())
             .context("create GPU surface")?;
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -168,6 +174,7 @@ impl Renderer {
         });
         tracing::info!(gpu = %info.name, backend = ?info.backend, ?present_mode, "GPU renderer ready");
         Ok(Self {
+            window,
             surface,
             device,
             queue,
@@ -177,7 +184,18 @@ impl Renderer {
             sampler,
             uniform,
             textures: None,
+            home_hovered: false,
+            home_pressed: false,
         })
+    }
+
+    /// Updates button feedback without scheduling an idle redraw loop.
+    /// The window loop should redraw only when this returns true.
+    pub fn set_home_state(&mut self, hovered: bool, pressed: bool) -> bool {
+        let changed = self.home_hovered != hovered || self.home_pressed != pressed;
+        self.home_hovered = hovered;
+        self.home_pressed = pressed;
+        changed
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -234,21 +252,48 @@ impl Renderer {
                 },
             );
         }
-        let frame_aspect = frame.width as f32 / frame.height as f32;
-        let window_aspect = self.config.width as f32 / self.config.height as f32;
-        let scale = if frame_aspect > window_aspect {
-            [1.0, window_aspect / frame_aspect]
-        } else {
-            [frame_aspect / window_aspect, 1.0]
+        let scale_factor = self.window.scale_factor();
+        let geometry = ViewerLayout::new(
+            self.config.width,
+            self.config.height,
+            frame.width,
+            frame.height,
+            scale_factor,
+        );
+        let rectangle = |rect: super::layout::Rect| {
+            [
+                rect.x as f32,
+                rect.y as f32,
+                rect.width as f32,
+                rect.height as f32,
+            ]
         };
         let parameters = Parameters {
-            scale,
-            nv12: if frame.layout == Layout::Nv12 {
-                1.0
-            } else {
-                0.0
-            },
-            full_range: if frame.full_range { 1.0 } else { 0.0 },
+            viewport: [
+                self.config.width as f32,
+                self.config.height as f32,
+                if frame.layout == Layout::Nv12 {
+                    1.0
+                } else {
+                    0.0
+                },
+                if frame.full_range { 1.0 } else { 0.0 },
+            ],
+            screen: rectangle(geometry.screen),
+            home: rectangle(geometry.home),
+            footer: rectangle(geometry.footer),
+            style: [
+                geometry.corner_radius as f32,
+                (geometry.home.width.min(geometry.home.height) / 2.0) as f32,
+                if self.home_pressed {
+                    2.0
+                } else if self.home_hovered {
+                    1.0
+                } else {
+                    0.0
+                },
+                scale_factor as f32,
+            ],
             coefficients: if frame.bt709 {
                 [1.5748, -0.187324, -0.468124, 1.8556]
             } else {

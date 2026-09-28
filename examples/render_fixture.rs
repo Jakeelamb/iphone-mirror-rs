@@ -2,12 +2,12 @@
 //! Add `--hardware` to exercise hardware decode and NV12 presentation.
 //! Displays only synthetic testsrc2 content and never opens a device connection.
 use anyhow::{Context, Result};
-use iphone_mirror_rs::video::{DecodeMode, DecodedFrame, Decoder, Renderer};
+use iphone_mirror_rs::video::{DecodeMode, DecodedFrame, Decoder, Renderer, ViewerLayout};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::WindowEvent;
+use winit::event::{MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
@@ -20,6 +20,8 @@ struct Fixture {
     next_frame: Instant,
     count: usize,
     error: Option<anyhow::Error>,
+    home_hovered: bool,
+    home_armed: bool,
 }
 
 impl Fixture {
@@ -53,6 +55,15 @@ impl Fixture {
         self.error = Some(error);
         event_loop.exit();
     }
+
+    fn button_feedback(&mut self) {
+        if let Some(renderer) = &mut self.renderer
+            && renderer.set_home_state(self.home_hovered, self.home_armed && self.home_hovered)
+            && let Some(window) = &self.window
+        {
+            window.request_redraw();
+        }
+    }
 }
 
 impl ApplicationHandler for Fixture {
@@ -68,9 +79,42 @@ impl ApplicationHandler for Fixture {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
+                self.home_hovered = false;
+                self.home_armed = false;
+                self.button_feedback();
                 if let Some(renderer) = &mut self.renderer {
                     renderer.resize(size.width, size.height);
                 }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                if let (Some(window), Some(frame)) = (&self.window, &self.frame) {
+                    let size = window.inner_size();
+                    self.home_hovered = ViewerLayout::new(
+                        size.width,
+                        size.height,
+                        frame.width,
+                        frame.height,
+                        window.scale_factor(),
+                    )
+                    .home_contains(position.x, position.y);
+                    self.button_feedback();
+                }
+            }
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Left,
+                ..
+            } => {
+                if !state.is_pressed() && self.home_armed && self.home_hovered {
+                    tracing::info!("synthetic Home activated; no device connected");
+                }
+                self.home_armed = state.is_pressed() && self.home_hovered;
+                self.button_feedback();
+            }
+            WindowEvent::CursorLeft { .. } | WindowEvent::Focused(false) => {
+                self.home_hovered = false;
+                self.home_armed = false;
+                self.button_feedback();
             }
             WindowEvent::RedrawRequested => {
                 if let Err(error) = self.next() {
@@ -123,6 +167,8 @@ fn main() -> Result<()> {
         next_frame: Instant::now(),
         count: 0,
         error: None,
+        home_hovered: false,
+        home_armed: false,
     };
     EventLoop::new()?
         .run_app(&mut app)
