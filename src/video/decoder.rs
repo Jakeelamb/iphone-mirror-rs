@@ -13,6 +13,8 @@ use std::time::Instant;
 pub enum DecodeMode {
     #[default]
     Auto,
+    Cuda,
+    Vaapi,
     Software,
 }
 
@@ -98,8 +100,8 @@ impl Decoder {
             (*decoder.context).thread_count = 1;
             (*decoder.context).flags |= av::AV_CODEC_FLAG_LOW_DELAY as i32;
             (*decoder.context).pkt_timebase = av::AVRational { num: 1, den: 60 };
-            if matches!(mode, DecodeMode::Auto) {
-                decoder.try_hardware(codec);
+            if !matches!(mode, DecodeMode::Software) {
+                decoder.try_hardware(codec, mode);
             }
             check(av::avcodec_open2(decoder.context, codec, ptr::null_mut()))
                 .context("open HEVC decoder")?;
@@ -111,17 +113,18 @@ impl Decoder {
         }
     }
 
-    unsafe fn try_hardware(&mut self, codec: *const av::AVCodec) {
-        // Prefer direct Mesa AMD VAAPI over the NVIDIA VAAPI/CUDA bridge on
-        // hybrid systems. The latter can silently win through a process-wide
-        // LIBVA_DRIVER_NAME override even when rendering uses the integrated GPU.
-        // Fall back to normal driver selection, then CUDA, then software.
+    unsafe fn try_hardware(&mut self, codec: *const av::AVCodec, mode: DecodeMode) {
+        // Prefer direct CUDA over the NVIDIA VAAPI bridge: live profiling found
+        // the bridge allocates an intermediate image on every hardware download.
+        // VAAPI remains the fallback on non-NVIDIA machines. Explicit Vaapi also
+        // tries direct AMD nodes before the system driver preference.
         unsafe {
-            let preferred = amd_render_nodes(Path::new("/sys/class/drm"), Path::new("/dev/dri"));
-            for kind in [
-                av::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,
-                av::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA,
-            ] {
+            let preferred = if matches!(mode, DecodeMode::Vaapi) {
+                amd_render_nodes(Path::new("/sys/class/drm"), Path::new("/dev/dri"))
+            } else {
+                Vec::new()
+            };
+            for kind in hardware_order(mode) {
                 let mut index = 0;
                 loop {
                     let config = av::avcodec_get_hw_config(codec, index);
@@ -369,6 +372,16 @@ impl Decoder {
     }
 }
 
+fn hardware_order(mode: DecodeMode) -> [av::AVHWDeviceType; 2] {
+    let vaapi = av::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI;
+    let cuda = av::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA;
+    if matches!(mode, DecodeMode::Auto | DecodeMode::Cuda) {
+        [cuda, vaapi]
+    } else {
+        [vaapi, cuda]
+    }
+}
+
 fn amd_render_nodes(sysfs: &Path, devices: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(sysfs) else {
         return Vec::new();
@@ -497,6 +510,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn explicit_preferences_keep_fallback_order() {
+        use av::AVHWDeviceType::{AV_HWDEVICE_TYPE_CUDA as CUDA, AV_HWDEVICE_TYPE_VAAPI as VAAPI};
+        assert_eq!(hardware_order(DecodeMode::Auto), [CUDA, VAAPI]);
+        assert_eq!(hardware_order(DecodeMode::Cuda), [CUDA, VAAPI]);
+        assert_eq!(hardware_order(DecodeMode::Vaapi), [VAAPI, CUDA]);
+    }
+
+    #[test]
     fn amd_node_discovery_filters_vendor_and_ignores_non_render_entries() -> Result<()> {
         let path = std::env::temp_dir().join(format!(
             "mirror-vaapi-{}-{}",
@@ -594,24 +615,29 @@ mod tests {
     #[test]
     #[ignore = "probes local GPU devices; run explicitly during hardware qualification"]
     fn automatic_decoder_matches_software_picture_content() {
-        let mut hardware = Decoder::new(DecodeMode::Auto).expect("automatic decoder");
-        let mut software = Decoder::new(DecodeMode::Software).expect("software decoder");
-        for unit in split_units(include_bytes!("fixtures/motion-256x384.hevc")) {
-            let mut hardware_picture = None;
-            let mut software_picture = None;
-            hardware
-                .decode(unit, Instant::now(), |frame| hardware_picture = Some(frame))
-                .expect("automatic decode");
-            software
-                .decode(unit, Instant::now(), |frame| software_picture = Some(frame))
-                .expect("software decode");
-            let hardware_picture = hardware_picture.expect("automatic picture");
-            let software_picture = software_picture.expect("software picture");
-            assert_eq!(
-                hardware_picture.planes[0].bytes,
-                software_picture.planes[0].bytes
+        for mode in [DecodeMode::Auto, DecodeMode::Cuda, DecodeMode::Vaapi] {
+            let mut hardware = Decoder::new(mode).expect("automatic decoder");
+            let mut software = Decoder::new(DecodeMode::Software).expect("software decoder");
+            for unit in split_units(include_bytes!("fixtures/motion-256x384.hevc")) {
+                let mut hardware_picture = None;
+                let mut software_picture = None;
+                hardware
+                    .decode(unit, Instant::now(), |frame| hardware_picture = Some(frame))
+                    .expect("automatic decode");
+                software
+                    .decode(unit, Instant::now(), |frame| software_picture = Some(frame))
+                    .expect("software decode");
+                let hardware_picture = hardware_picture.expect("automatic picture");
+                let software_picture = software_picture.expect("software picture");
+                assert_eq!(
+                    hardware_picture.planes[0].bytes,
+                    software_picture.planes[0].bytes
+                );
+            }
+            eprintln!(
+                "mode {mode:?}: actual hardware active: {:?}",
+                hardware.hardware_active()
             );
         }
-        eprintln!("actual hardware active: {:?}", hardware.hardware_active());
     }
 }
