@@ -1,129 +1,160 @@
 # iPhone Mirror Rust
 
-A native Linux iPhone viewer with keyboard and pointer control. Rust handles the
-authenticated device connection, HEVC packet assembly, input and window loop;
-FFmpeg decodes video and wgpu renders YUV directly. Python and MPV are not runtime
-dependencies.
+Mirror and control an iPhone from Linux with a native Rust viewer, FFmpeg
+hardware decoding and wgpu rendering. Supports mouse input, keyboard input,
+Home, and automatic portrait/landscape rotation. No Python or MPV is needed to
+**run the viewer**; first-time phone preparation uses a separate setup tool.
 
-The native Wi-Fi path has streamed a real iPhone 15 on iOS 27 at 1184×2576 using
-VAAPI decoding and an AMD Vulkan renderer. See [validation and measurement
-limits](docs/performance.md) before interpreting latency counters. A measured
-speedup over the reference application has not been established.
+**Experimental.** Live-tested over Wi-Fi on an iPhone 15 running iOS 27, with
+Arch Linux/Omarchy on x86-64. USB is implemented but has not been live-tested in
+this Rust viewer. Other phones, iOS releases, desktops and GPU combinations are
+not yet qualified. Omarchy is not a runtime dependency.
 
-## Build and run
+## Quick start
 
-Requirements: Rust 1.96 or newer, `pkg-config`, Clang/libclang,
-FFmpeg development libraries (`libavcodec` and `libavutil`), and a Vulkan driver.
-USB discovery additionally needs `usbmuxd`. The tested system uses FFmpeg 9.0.1;
-the build generates bindings against the installed headers. The tested Rust
-compiler is 1.96.0.
+### 1. Install build dependencies
 
-The iPhone must already be paired, unlocked, and have Developer Mode enabled and
-its developer services available. The tested remote-control service requires
-iOS 27. This tool currently uses existing pairing records; it does not perform
-first-time pairing or mount a developer image.
+You need Rust **1.96 or newer**, a C compiler, `pkg-config`, Clang/libclang,
+FFmpeg development libraries (`libavcodec` and `libavutil`), and a working Vulkan
+renderer. The tested FFmpeg version is **9.0.1**; other versions are unverified.
+Use [rustup](https://rustup.rs/) if your distribution's Rust is too old.
+
+On Arch Linux/Omarchy:
 
 ```sh
-cargo build --release --locked
+sudo pacman -Syu --needed base-devel clang ffmpeg git pkgconf rustup usbmuxd
+rustup toolchain install 1.96.0 --profile minimal --component rustfmt,clippy
+```
+
+Keep the GPU driver appropriate for your hardware installed. CUDA/NVDEC and
+VAAPI decoding are optional: decoding falls back to software, but the window
+still needs a Vulkan renderer. Other distributions need equivalent development
+packages; no Debian/Ubuntu or Fedora build has been verified yet.
+
+### 2. Prepare the phone
+
+The phone must be unlocked, trust this computer, have Developer Mode enabled,
+and have a compatible developer image mounted. Wi-Fi also needs a saved
+CoreDevice pairing record and a reachable local network.
+
+Follow [phone setup](docs/phone-setup.md) if this computer is not already ready.
+The viewer does not create pairing records, download images or mount them.
+
+### 3. Clone, build and run
+
+```sh
+git clone https://github.com/Jakeelamb/iphone-mirror-rs.git
+cd iphone-mirror-rs
+cargo +1.96.0 build --release --locked
 ./target/release/iphone-mirror-rs --connection wifi
 ```
 
-Optional installation (the profiling build remains in `target/release`):
+Close the window or press Ctrl+C in the launching terminal to stop. Only one
+viewer should control a phone at a time. The connection is selected at startup;
+close and reopen the viewer to change transports.
+
+Optional installation:
 
 ```sh
 install -Dm755 -s target/release/iphone-mirror-rs ~/.local/bin/iphone-mirror-rs
-iphone-mirror-rs --connection wifi
+~/.local/bin/iphone-mirror-rs --connection wifi
 ```
 
-Wi-Fi uses the existing CoreDevice pairing under
-`$XDG_DATA_HOME/pymobiledevice3`, defaulting to
-`~/.local/share/pymobiledevice3`. Keep the phone on the same reachable local
-network. Pairing records are read without being changed. With multiple saved
-devices, select `--serial ID` or `--pairing-file PATH`.
-
-```sh
-./target/release/iphone-mirror-rs --connection usb
-./target/release/iphone-mirror-rs --decoder vaapi --connection wifi
-./target/release/iphone-mirror-rs --software --connection wifi
-./target/release/iphone-mirror-rs --headless --duration 30 --connection wifi
-./target/release/iphone-mirror-rs --help
-```
-
-The default connection mode is `auto`: try USB, then Wi-Fi. `--address IP:PORT`
-selects a Wi-Fi remote-pairing endpoint explicitly. Only one instance runs at a
-time. Close the window or use Ctrl+C to end the session. `--duration SECONDS`
-limits total run time, including connection setup. Use one mirroring controller
-at a time: iOS 27 shutdown uses the native device-wide `stopAll` media request,
-sent only after this process has successfully started its stream.
+Rebuild and repeat that install command after updating. To uninstall, remove
+`~/.local/bin/iphone-mirror-rs`. Pairing records and developer images are separate
+from the application and remain on the computer.
 
 ## Controls
 
-| Computer input | iPhone action |
+| Input | Action |
 | --- | --- |
-| Left click and drag | Single-finger touch and drag |
-| Vertical mouse wheel | A short vertical swipe at the pointer position |
-| Keyboard | ASCII text keys, modifiers and navigation keys over HID |
-| House button below the screen, or F1 | Home button |
-| F2 | Spotlight shortcut, Command+Space |
+| Left click / drag | Single-finger tap / drag |
+| Vertical mouse wheel | Vertical swipe at the pointer |
+| Keyboard | ASCII text, modifiers and navigation keys |
+| House button below the picture, or F1 | Home |
+| F2 | Spotlight |
 
-The window must be focused. The house button activates on click release; moving
-outside it before releasing cancels the click. The video keeps its aspect ratio
-and has rounded screen corners. Clicks in clipped corners, margins or the
-control strip do not start phone touches.
-Leaving the window ends a drag; losing focus releases held input. ASCII typing
-follows the host logical character, including shifted punctuation, while
-modifier and key-release state remains tied to physical keys. Unicode/IME
-composition, custom game keymaps, simultaneous touch contacts, clipboard text
-injection and audio are not implemented.
+Focus the window before using input. Leaving the window ends a drag; losing
+focus releases held input. The Home button activates on release inside it.
+Margins and clipped corners do not send touches.
 
-The viewer follows the phone's interface orientation, including both landscape
-directions. Video rotation happens in the GPU shader; taps, drags and wheel
-swipes use the same transformation. A rotation ends any active touch first.
-Already-landscape video buffers are not rotated a second time. Orientation is
-polled about every 400 ms independently of video; temporary service failures
-retain the last orientation and retry without stopping the stream.
+Orientation follows the phone's **interface**, so an app locked to portrait
+stays portrait. Rotation is checked about every 400 ms; video, taps and wheel
+swipes use the same transformation. The Home strip stays upright. The window
+requests a matching size, but tiling or maximization can override it and leave
+letterboxing. Resize or float the window in your desktop if needed.
 
-On the first frame and when the displayed dimensions change, the window requests
-a size fitted to the phone plus the Home strip. Tiling or maximization may let
-the desktop compositor override that request; remaining space is letterboxed.
+Not implemented: audio, clipboard injection, Unicode/IME composition, custom
+game keymaps or simultaneous touch contacts. There is no automatic reconnection
+after a failed session.
 
-## Architecture and development
-
-Complete HEVC access units go straight into FFmpeg, avoiding a byte-stream
-demuxer/parser waiting for a subsequent frame. Encoded frames retain dependency
-order in a bounded handoff. The presentation mailbox holds only the newest
-complete decoded picture. Compressed packet buffers, decoded planes and GPU
-textures are reused.
-
-Hardware decoding defaults to direct CUDA/NVDEC, then VAAPI, with software
-fallback. `--decoder cuda|vaapi|software|auto` selects a preference; `vaapi` tries
-a direct AMD render node first when available. This overrides the VAAPI driver
-for that device only and does not change system settings. The current
-hardware path downloads decoded frames to reusable CPU buffers and uploads YUV
-planes to wgpu; it is **not zero-copy**. The renderer supports 8-bit YUV420P and
-NV12 and selects Immediate, Mailbox, then FIFO presentation according to surface
-support. Immediate presentation can trade tearing for shorter queueing.
+## Options
 
 ```sh
-cargo fmt --all --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all
-cargo run --example render_fixture
-cargo run --example render_fixture -- --hardware
+# Try USB first, then Wi-Fi (the default).
+iphone-mirror-rs --connection auto
+
+# Select a decoder preference; unavailable hardware falls back.
+iphone-mirror-rs --connection wifi --decoder vaapi
+iphone-mirror-rs --connection wifi --decoder software
+
+# Select a saved pairing explicitly.
+iphone-mirror-rs --connection wifi --pairing-file /path/to/remote_DEVICE.plist
+
+# Bounded diagnostic run; duration includes connection setup.
+iphone-mirror-rs --connection wifi --duration 30 --trace /tmp/mirror-run.log
+
+iphone-mirror-rs --help
 ```
 
-The fixture viewer uses synthetic content and never connects to a phone.
-[Development notes](docs/development.md) explain module boundaries and hardware
-qualification. [Performance notes](docs/performance.md) describe CPU/allocation
-profiling, the scrolling workload, and `--measure-stamp`.
+Use `./target/release/iphone-mirror-rs` instead if you did not install the binary.
+Trace files must not already exist. `--serial ID` selects among saved devices;
+`--address IP:PORT` supplies a known Wi-Fi pairing endpoint when discovery is
+unavailable. `--headless` tests transport/decoding without a window.
 
-## Reference and license
+## Troubleshooting
 
-The protocol and behavior reference is
-[omarchy-iphone-mirror](https://github.com/daniellemky/omarchy-iphone-mirror).
-The native transport uses `idevice`, pinned to the revision in `Cargo.toml`.
+| Symptom | Check |
+| --- | --- |
+| No saved pairing / several pairings | Follow [phone setup](docs/phone-setup.md), or select `--pairing-file` / `--serial`. |
+| Wi-Fi discovery fails | Unlock the phone; use the same reachable LAN. Guest-network isolation can block discovery. |
+| Developer/display service fails to open | Check Developer Mode, the mounted image and iOS compatibility. Successful pairing alone does not prove mirroring support. |
+| Decoder initialization or driver errors | Try `--decoder software`. For VAAPI try `--decoder vaapi`; the selected backend is logged. |
+| GPU window fails | Check that Vulkan works in the current desktop session. Software decoding does not replace the renderer. |
+| Black margins | The image preserves its aspect ratio. Floating/resizing can let the window fit the phone. |
+| Another viewer is running | Close the existing viewer before starting another. |
 
-This project is [GPL-3.0-or-later](LICENSE). Dependencies retain their own
-licenses; `idevice` is MIT, and the installed FFmpeg build determines its enabled
-components and license configuration. Keep pairing credentials, screen captures
-and local profiling artifacts out of Git.
+For a bug report, include the command, OS, phone/iOS version, transport, GPU,
+FFmpeg version and relevant trace lines. Never attach pairing records or
+private screen content. See [contributing](CONTRIBUTING.md).
+
+## Design and performance
+
+Complete HEVC pictures go directly into FFmpeg. Encoded pictures keep their
+reference order in a bounded queue; presentation retains only the newest
+complete decoded picture. Packet buffers, decoded planes and GPU textures are
+reused. Rotation runs in the shader.
+
+Automatic decoding prefers CUDA/NVDEC, then VAAPI, then software. The current
+hardware path downloads frames to CPU memory and uploads their YUV planes to
+wgpu: **it is not zero-copy**. Immediate presentation is preferred where supported
+and can trade tearing for less queueing.
+
+An earlier build sustained about 60 FPS in the tested scrolling workload, with
+about 59 ms synthetic source-to-GPU-submission delay. That is **not**
+click-to-photon latency or a guarantee for other systems. There is no matched
+speedup comparison against the Python reference. See [measurements and their
+limits](docs/performance.md) and [architecture/testing](docs/development.md).
+
+## Credits and license
+
+Built using [idevice](https://github.com/jkcoxson/idevice),
+[FFmpeg](https://ffmpeg.org/), [wgpu](https://wgpu.rs/) and
+[winit](https://github.com/rust-windowing/winit).
+[Daniel Lemky's omarchy-iphone-mirror](https://github.com/daniellemky/omarchy-iphone-mirror)
+and [pymobiledevice3](https://github.com/doronz88/pymobiledevice3) provided protocol
+and behavior references.
+
+Source is licensed under [GPL-3.0-or-later](LICENSE). See
+[third-party notices](THIRD_PARTY_NOTICES.md) for attribution and dependency scope.
+This is an independent project, not affiliated with Apple.

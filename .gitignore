@@ -12,3 +12,11 @@
 /artifacts/
 /perf.data*
 /heaptrack.*
+
+# Local diagnostics and credentials (synthetic source fixtures are intentional).
+*.log
+*.heap
+*.heap.zst
+*.pem
+*.key
+.env.*

@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    container: archlinux:base
+    timeout-minutes: 25
+    steps:
+      - name: Install build dependencies
+        run: pacman -Syu --noconfirm --needed base-devel clang ffmpeg git rustup
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: rustup toolchain install 1.96.0 --profile minimal --component rustfmt,clippy
+      - name: Format
+        run: cargo +1.96.0 fmt --all --check
+      - name: Lint
+        run: cargo +1.96.0 clippy --locked --all-targets --all-features -- -D warnings
+      - name: Test without a phone or GPU
+        run: cargo +1.96.0 test --locked --all-targets
+      - name: Build
+        run: cargo +1.96.0 build --locked
+      - name: CLI help
+        run: ./target/debug/iphone-mirror-rs --help
