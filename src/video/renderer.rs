@@ -189,7 +189,8 @@ impl Renderer {
         self.surface.configure(&self.device, &self.config);
     }
 
-    pub fn render(&mut self, frame: &DecodedFrame) -> Result<()> {
+    /// Returns true after submission, or false if a surface timeout skipped it.
+    pub fn render(&mut self, frame: &DecodedFrame) -> Result<bool> {
         let started = Instant::now();
         ensure!(
             frame.width <= self.device.limits().max_texture_dimension_2d
@@ -266,7 +267,7 @@ impl Renderer {
             }
             Err(wgpu::SurfaceError::Timeout) => {
                 tracing::warn!("GPU surface acquisition timed out; dropping decoded picture");
-                return Ok(());
+                return Ok(false);
             }
             Err(error) => return Err(error).context("acquire GPU surface"),
         };
@@ -304,7 +305,7 @@ impl Renderer {
             decode_to_submit_us = frame.decoded_at.elapsed().as_micros() as u64,
             "presentation submitted; excludes capture, network and compositor scanout"
         );
-        Ok(())
+        Ok(true)
     }
 
     fn make_textures(&self, frame: &DecodedFrame) -> Textures {

@@ -282,14 +282,14 @@ impl ApplicationHandler<AppEvent> for App {
                 }
                 if let (Some(renderer), Some(frame)) = (&mut self.renderer, &self.frame) {
                     match renderer.render(frame) {
-                        Ok(()) if changed => {
+                        Ok(true) if changed => {
                             self.metrics.submitted.fetch_add(1, Ordering::Relaxed);
                             self.metrics
                                 .receive_to_submit
                                 .record(frame.received_at.elapsed());
                             self.metrics.record_source_stamp(frame);
                         }
-                        Ok(()) => {}
+                        Ok(_) => {}
                         Err(error) => {
                             tracing::error!(%error, "GPU frame submission failed");
                             self.failed = true;
