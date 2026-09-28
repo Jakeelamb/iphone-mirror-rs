@@ -22,6 +22,7 @@ pub enum Action {
     Crouch,
     Fire,
     Aim,
+    Sprint,
 }
 const BUTTONS: [Action; 11] = [
     Action::LeanLeft,
@@ -128,6 +129,8 @@ pub struct Profile {
     pub sensitivity: f64,
     /// Joystick displacement as a fraction of the displayed short edge.
     pub joystick_radius: f64,
+    /// Forward joystick radius multiplier while sprint is held, capped at 0.5.
+    pub sprint_multiplier: f64,
 }
 impl Default for Profile {
     fn default() -> Self {
@@ -135,6 +138,7 @@ impl Default for Profile {
             points: [None; 13],
             sensitivity: 0.002,
             joystick_radius: 0.08,
+            sprint_multiplier: 2.0,
         }
     }
 }
@@ -171,6 +175,11 @@ impl Profile {
                 "joystick_radius must be within 0.001..0.5",
             ));
         }
+        if !self.sprint_multiplier.is_finite() || !(1.0..=4.0).contains(&self.sprint_multiplier) {
+            return Err(GameError::InvalidProfile(
+                "sprint_multiplier must be within 1..4",
+            ));
+        }
         Ok(())
     }
     /// Versioned text; absent targets remain uncalibrated, never guessed.
@@ -179,6 +188,7 @@ impl Profile {
         let mut version = false;
         let mut sensitivity = false;
         let mut radius = false;
+        let mut sprint = false;
         for line in text
             .lines()
             .map(str::trim)
@@ -201,6 +211,12 @@ impl Profile {
                         .parse()
                         .map_err(|_| GameError::InvalidProfile("invalid joystick_radius"))?;
                     radius = true;
+                }
+                "sprint_multiplier" if !sprint => {
+                    profile.sprint_multiplier = value
+                        .parse()
+                        .map_err(|_| GameError::InvalidProfile("invalid sprint_multiplier"))?;
+                    sprint = true;
                 }
                 _ => {
                     let index =
@@ -259,8 +275,8 @@ impl Profile {
         let result = (|| -> std::io::Result<()> {
             writeln!(
                 file,
-                "version=1\nsensitivity={}\njoystick_radius={}",
-                self.sensitivity, self.joystick_radius
+                "version=1\nsensitivity={}\njoystick_radius={}\nsprint_multiplier={}",
+                self.sensitivity, self.joystick_radius, self.sprint_multiplier
             )?;
             for (i, point) in self.points.iter().enumerate() {
                 if let Some(p) = point {
@@ -311,10 +327,11 @@ struct Contact {
 pub struct GameState {
     profile: Profile,
     contacts: [Option<Contact>; 5],
-    held: [bool; 15],
+    held: [bool; 16],
     look: Option<Point>,
     aspect: f64,
     rotation: u16,
+    movement_idle_since: Option<u64>,
 }
 impl GameState {
     pub fn new(profile: Profile) -> Result<Self, GameError> {
@@ -325,10 +342,11 @@ impl GameState {
         Ok(Self {
             profile,
             contacts: [None; 5],
-            held: [false; 15],
+            held: [false; 16],
             look: None,
             aspect: 1.0,
             rotation: 0,
+            movement_idle_since: None,
         })
     }
     /// Set displayed width/height. Caller releases contacts before geometry changes.
@@ -388,7 +406,7 @@ impl GameState {
         let batch = if rotation != self.rotation {
             self.release_all(timestamp)
         } else {
-            EventBatch::default()
+            self.expire_idle_movement(timestamp)
         };
         self.rotation = rotation;
         batch
@@ -404,27 +422,38 @@ impl GameState {
         if self.held[action as usize] == pressed {
             return batch;
         }
-        if (action as usize) < 4 {
+        if (action as usize) < 4 || action == Action::Sprint {
             self.held[action as usize] = pressed;
             let center = self.point(Target::Joystick);
+            // Shift alone never begins a gesture or starts moving.
+            if action == Action::Sprint && self.contacts[0].is_none() {
+                return batch;
+            }
             if self.contacts[0].is_none() {
                 self.contacts[0] = Some(self.contact(center, None));
                 batch.push(self.report(TouchPhase::AnchorBegin, 0, timestamp));
             }
-            // Keep the established origin while idle. Returning to center
-            // stops movement immediately, without restarting the gesture on
-            // the next direction key. release_all still lifts every contact.
+            // Preserve the origin during quick handoffs, but let the event-loop
+            // timer lift idle movement so it cannot span screen changes forever.
+            if self.held[..4].iter().any(|&held| held) {
+                self.movement_idle_since = None;
+            } else {
+                self.movement_idle_since.get_or_insert(timestamp);
+            }
             let dx = i32::from(self.held[Action::Right as usize])
                 - i32::from(self.held[Action::Left as usize]);
             let dy = i32::from(self.held[Action::Down as usize])
                 - i32::from(self.held[Action::Up as usize]);
             let norm = f64::from(dx * dx + dy * dy).sqrt().max(1.0);
             let (sx, sy) = self.scale();
+            let radius = if self.held[Action::Sprint as usize] && dy < 0 {
+                (self.profile.joystick_radius * self.profile.sprint_multiplier).min(0.5)
+            } else {
+                self.profile.joystick_radius
+            };
             let p = Point {
-                x: (center.x + f64::from(dx) / norm * self.profile.joystick_radius * sx)
-                    .clamp(0.0, 1.0),
-                y: (center.y + f64::from(dy) / norm * self.profile.joystick_radius * sy)
-                    .clamp(0.0, 1.0),
+                x: (center.x + f64::from(dx) / norm * radius * sx).clamp(0.0, 1.0),
+                y: (center.y + f64::from(dy) / norm * radius * sy).clamp(0.0, 1.0),
             };
             self.contacts[0] = Some(self.contact(p, None));
             batch.push(self.report(TouchPhase::Move, 0, timestamp));
@@ -529,6 +558,21 @@ impl GameState {
         self.contacts.fill(None);
         self.held.fill(false);
         self.look = None;
+        self.movement_idle_since = None;
+        batch
+    }
+    /// Deadline in the caller's nanosecond timestamp domain.
+    pub fn movement_deadline(&self) -> Option<u64> {
+        self.movement_idle_since
+            .map(|at| at.saturating_add(150_000_000))
+    }
+    /// Lift only idle movement; aiming and held action contacts remain intact.
+    pub fn expire_idle_movement(&mut self, timestamp: u64) -> EventBatch {
+        let mut batch = EventBatch::default();
+        if self.movement_deadline().is_some_and(|at| timestamp >= at) {
+            self.release_slot(0, timestamp, &mut batch);
+            self.movement_idle_since = None;
+        }
         batch
     }
 }
@@ -617,6 +661,8 @@ mod tests {
         assert!(loaded.calibrated());
         assert_eq!(loaded.sensitivity, p.sensitivity);
         assert_eq!(loaded.joystick_radius, p.joystick_radius);
+        assert_eq!(loaded.sprint_multiplier, p.sprint_multiplier);
+        assert_eq!(Profile::parse("version=1").unwrap().sprint_multiplier, 2.0);
         for target in CALIBRATION_TARGETS {
             assert_eq!(loaded.point(target), p.point(target));
         }
@@ -635,6 +681,10 @@ mod tests {
             "version=1\nsensitivity=0",
             "version=1\njoystick_radius=NaN",
             "version=1\njoystick_radius=0.6",
+            "version=1\nsprint_multiplier=NaN",
+            "version=1\nsprint_multiplier=0.9",
+            "version=1\nsprint_multiplier=4.1",
+            "version=1\nsprint_multiplier=2\nsprint_multiplier=3",
             "version=1\nlook=0.5,0.5\nlook=0.4,0.4",
             "version=1\nunknown=1",
         ] {
@@ -767,6 +817,97 @@ mod tests {
             reports(s.key(Action::LeanLeft, true, 0, 4))[0].0,
             TouchPhase::Begin
         );
+    }
+
+    #[test]
+    fn sprint_changes_existing_forward_contact_and_preserves_other_fingers() {
+        let mut s = state();
+        assert!(reports(s.key(Action::Sprint, true, 0, 0)).is_empty());
+        let forward = reports(s.key(Action::Up, true, 0, 1));
+        assert_eq!(forward.len(), 2);
+        assert_eq!(contact(&forward[1].1, 0), Some((true, 32768, 22282)));
+        reports(s.motion(1.0, 1.0, 0, 2));
+        reports(s.key(Action::LeanLeft, true, 0, 3));
+        let held = reports(s.key(Action::Fire, true, 0, 4))[0].1;
+        let walking = reports(s.key(Action::Sprint, false, 0, 5));
+        assert_eq!(walking.len(), 1);
+        assert_eq!(walking[0].0, TouchPhase::Move);
+        assert_eq!(contact(&walking[0].1, 0), Some((true, 32768, 27525)));
+        for id in 1..4 {
+            assert_eq!(contact(&walking[0].1, id), contact(&held, id));
+        }
+        reports(s.key(Action::Sprint, true, 0, 6));
+        let neutral = reports(s.key(Action::Up, false, 0, 7));
+        assert_eq!(contact(&neutral[0].1, 0), Some((true, 32768, 32768)));
+        let backward = reports(s.key(Action::Down, true, 0, 8));
+        assert_eq!(contact(&backward[0].1, 0), Some((true, 32768, 38010)));
+        reports(s.release_all(9));
+        let fresh = reports(s.key(Action::Up, true, 0, 10));
+        assert_eq!(contact(&fresh[1].1, 0), Some((true, 32768, 27525)));
+    }
+
+    #[test]
+    fn idle_movement_expires_before_reusing_a_gesture_after_respawn_pause() {
+        let mut s = state();
+        reports(s.key(Action::Up, true, 0, 0));
+        let looking = reports(s.motion(1.0, 1.0, 0, 1));
+        let look = contact(&looking.last().unwrap().1, 1);
+        reports(s.key(Action::Up, false, 0, 10_000_000));
+        assert!(reports(s.expire_idle_movement(159_999_999)).is_empty());
+        let idle = reports(s.expire_idle_movement(160_000_000));
+        assert_eq!(
+            idle.len(),
+            1,
+            "a centered movement touch must not survive an idle pause indefinitely"
+        );
+        assert_eq!(idle[0].0, TouchPhase::End);
+        assert!(!contact(&idle[0].1, 0).unwrap().0);
+        assert_eq!(contact(&idle[0].1, 1), look);
+        let next = reports(s.key(Action::Right, true, 0, 200_000_000));
+        assert_eq!(next[0].0, TouchPhase::AnchorBegin);
+        assert_eq!(next[1].0, TouchPhase::Move);
+        assert_eq!(contact(&next[1].1, 1), look);
+    }
+
+    #[test]
+    fn movement_before_idle_deadline_cancels_expiry_and_late_input_reanchors() {
+        let mut s = state();
+        reports(s.key(Action::Up, true, 0, 0));
+        reports(s.key(Action::Up, false, 0, 10_000_000));
+        assert_eq!(s.movement_deadline(), Some(160_000_000));
+        let quick = reports(s.key(Action::Right, true, 0, 159_000_000));
+        assert_eq!(quick.len(), 1);
+        assert_eq!(quick[0].0, TouchPhase::Move);
+        assert_eq!(s.movement_deadline(), None);
+        assert!(reports(s.expire_idle_movement(200_000_000)).is_empty());
+        reports(s.key(Action::Right, false, 0, 210_000_000));
+        let late = reports(s.key(Action::Left, true, 0, 400_000_000));
+        assert_eq!(
+            late.iter().map(|(phase, _)| *phase).collect::<Vec<_>>(),
+            [TouchPhase::End, TouchPhase::AnchorBegin, TouchPhase::Move]
+        );
+        reports(s.release_all(410_000_000));
+        assert_eq!(s.movement_deadline(), None);
+    }
+
+    #[test]
+    fn sprint_diagonals_normalize_and_rotate_without_lifting_movement() {
+        for rotation in [0, 90, 180, 270] {
+            for aspect in [0.5, 1.0, 2.0] {
+                let mut s = state();
+                s.set_aspect(aspect).unwrap();
+                reports(s.key(Action::Up, true, rotation, 0));
+                reports(s.key(Action::Right, true, rotation, 1));
+                let sprint = reports(s.key(Action::Sprint, true, rotation, 2));
+                assert_eq!(sprint.len(), 1);
+                assert_eq!(sprint[0].0, TouchPhase::Move);
+                let (sx, sy) = s.scale();
+                let d = 0.16 / 2_f64.sqrt();
+                let (x, y) = normalized_position(0.5 + d * sx, 0.5 - d * sy, rotation).unwrap();
+                assert_eq!(contact(&sprint[0].1, 0), Some((true, x, y)));
+                assert!(reports(s.key(Action::Sprint, true, rotation, 3)).is_empty());
+            }
+        }
     }
 
     #[test]
@@ -1129,6 +1270,7 @@ mod tests {
             Action::Crouch,
             Action::Fire,
             Action::Aim,
+            Action::Sprint,
         ];
         let mut state = state();
         let mut remote: [Option<(u16, u16)>; 5] = [None; 5];

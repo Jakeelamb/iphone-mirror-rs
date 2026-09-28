@@ -57,6 +57,7 @@ pub struct App {
     rotation: u16,
     display_size: Option<(u32, u32)>,
     focused: bool,
+    game_shifts: [bool; 2],
     pub game: Option<crate::game_ui::GameControls>,
     pub presentation: PresentationOptions,
     pub failed: bool,
@@ -95,6 +96,7 @@ impl App {
             rotation: 0,
             display_size: None,
             focused: false,
+            game_shifts: [false; 2],
             game: None,
             presentation: PresentationOptions::default(),
             failed: false,
@@ -431,6 +433,7 @@ impl App {
     }
 
     fn exit_game(&mut self) {
+        self.game_shifts.fill(false);
         let timestamp = self.timestamp();
         if self
             .game
@@ -525,7 +528,10 @@ impl App {
                 false
             }
             _ if self.game_active() => {
-                if let Some(action) = crate::game_ui::action(code) {
+                if matches!(code, KeyCode::ShiftLeft | KeyCode::ShiftRight) {
+                    self.game_shifts[usize::from(code == KeyCode::ShiftRight)] = pressed;
+                    self.game_action(Action::Sprint, self.game_shifts.iter().any(|&held| held));
+                } else if let Some(action) = crate::game_ui::action(code) {
                     self.game_action(action, pressed);
                 }
                 true
@@ -540,6 +546,15 @@ impl App {
             let batch = state.key(action, pressed, self.rotation, timestamp);
             self.send_game(batch);
         }
+    }
+
+    fn advance_game(&mut self) -> Option<Instant> {
+        let timestamp = self.timestamp();
+        let state = self.game.as_mut()?.state.as_mut()?;
+        let batch = state.expire_idle_movement(timestamp);
+        let deadline = state.movement_deadline();
+        self.send_game(batch);
+        deadline.and_then(|at| self.clock.checked_add(Duration::from_nanos(at)))
     }
 }
 
@@ -758,10 +773,15 @@ impl ApplicationHandler<AppEvent> for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.advance_scroll(Instant::now());
+        let game_deadline = self.advance_game();
         event_loop.set_control_flow(
             self.wheel
                 .as_ref()
-                .map_or(ControlFlow::Wait, |(_, _, at)| ControlFlow::WaitUntil(*at)),
+                .map(|(_, _, at)| *at)
+                .into_iter()
+                .chain(game_deadline)
+                .min()
+                .map_or(ControlFlow::Wait, ControlFlow::WaitUntil),
         );
     }
 }
@@ -962,6 +982,47 @@ mod tests {
                 [HidEvent::ReleaseTouches { .. }]
             ));
         }
+    }
+
+    #[test]
+    fn either_shift_sprints_until_both_release_and_exit_clears_modifiers() {
+        let mut app = with_game();
+        app.key(KeyCode::KeyW, true);
+        events(&app);
+        app.key(KeyCode::ShiftLeft, true);
+        assert_eq!(events(&app).len(), 1);
+        app.key(KeyCode::ShiftRight, true);
+        app.key(KeyCode::ShiftLeft, false);
+        assert!(events(&app).is_empty());
+        app.key(KeyCode::ShiftRight, false);
+        assert_eq!(events(&app).len(), 1);
+        app.key(KeyCode::ShiftLeft, true);
+        events(&app);
+        app.key(KeyCode::Escape, true);
+        assert_eq!(app.game_shifts, [false; 2]);
+        assert!(matches!(
+            events(&app).as_slice(),
+            [HidEvent::ReleaseTouches { .. }]
+        ));
+    }
+
+    #[test]
+    fn idle_game_timer_releases_movement_without_waiting_for_another_key() {
+        let mut app = with_game();
+        app.key(KeyCode::KeyW, true);
+        app.key(KeyCode::KeyW, false);
+        events(&app);
+        assert!(app.advance_game().is_some());
+        app.clock -= Duration::from_millis(200);
+        assert!(app.advance_game().is_none());
+        assert!(matches!(
+            events(&app).as_slice(),
+            [HidEvent::Touch {
+                phase: TouchPhase::End,
+                ..
+            }]
+        ));
+        assert!(app.game_active());
     }
     #[test]
     fn home_exits_game_before_dispatching_phone_button() {

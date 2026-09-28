@@ -40,6 +40,10 @@ Enable **Lock Joystick in Place** so its origin matches your calibration.
 For manual firing, set **Gameplay → Input → ADS Auto-Shoot Behavior** and
 **Hip Fire Auto-Shoot Behavior** to **Off**. Hip-fire auto-shoot can also enter
 ADS when a target is out of range; that behavior comes from the game.
+For leaning without ADS, enable the game's **Hip Lean** option in Gameplay
+Settings, described in [Ubisoft's Hip Lean release notes](https://ubisoft-mobile.helpshift.com/hc/en/45-rainbow-six-mobile/faq/2388-patch-notes---1-5-toxic-fog/?p=web).
+The viewer sends the calibrated lean touch; it does not separately press ADS
+when Q/E are used. Recalibrate if changing this option changes HUD positions.
 
 ## Play
 
@@ -53,6 +57,7 @@ to the phone, so pending look recenters do not replay after Escape.
 | Input | Touch target |
 | --- | --- |
 | W / A / S / D | Movement joystick; diagonals have the same radius |
+| Hold Shift + W (optionally A / D) | Extend forward joystick displacement for sprint |
 | Q / E | Lean left / right |
 | R | Reload |
 | F | Interact |
@@ -68,9 +73,18 @@ toggle behavior in the game's settings. Unbound keys and the scroll wheel are
 suppressed while captured, so movement keys cannot accidentally type into a
 text field. Exit game mode to use menus or normal keyboard input.
 
-After the first movement press, the joystick contact stays down at its center
-when you release WASD. This stops movement without restarting the touch during
-quick direction changes. Escape, focus loss and leaving game mode lift it.
+Releasing WASD immediately centers the joystick, then lifts its touch after
+150 ms with no movement keys held. A direction change within that grace period
+reuses the origin; a longer pause starts a fresh gesture. This prevents idle
+movement touches from persisting indefinitely across gameplay screen changes.
+The viewer does not detect death/respawn; if controls still become stuck, use
+Escape then F8 to reset all contacts. Escape, focus loss and leaving game mode
+always lift contacts immediately.
+Either Shift key works; sprint stays requested until both are released. Shift
+alone does not start movement. Releasing Shift restores normal displacement
+without lifting the movement contact or disturbing look/lean/fire contacts.
+The game decides whether the larger displacement activates sprint, including
+its restrictions while aiming, crouching or moving diagonally.
 
 ## Tuning and limits
 
@@ -80,7 +94,14 @@ Profiles are small `name=value` text files with `version=1`. Targets use
 raw relative mouse unit (device/backend dependent, not screen pixels). Lower it
 for slower aiming. `joystick_radius=0.08` is
 also measured relative to the short edge; increase it if movement does not
-reach full speed. Restart the viewer after editing the file.
+reach full speed. `sprint_multiplier=2` multiplies that radius only while Shift
+and net forward movement are held. Values 1..4 are accepted; the resulting
+radius is capped at 0.5 of the short edge and coordinates stay within the image.
+Existing profiles default to 2 without recalibration. Tune it to the game's
+sprint threshold; this is a held joystick gesture, not a separate sprint-button
+tap or an intentional sprint-lock release. Ubisoft describes sprint-lock as
+[dragging past the joystick circle and releasing on the sprint icon](https://ubisoft-mobile.helpshift.com/hc/en/45-rainbow-six-mobile/faq/2266-how-do-i-automatically-run-sprint-lock/?p=web).
+Restart the viewer after editing the file.
 
 The protocol supports **five contacts**. Movement and looking each reserve one;
 three action buttons can be held together. Additional action presses are
@@ -102,7 +123,8 @@ A new joystick drag holds its center for 20 ms before moving. Back-to-back
 down/move reports were merged on the tested phone, losing the initial drag.
 Ordinary direction changes, looking and button presses add no such delay,
 although they can wait behind the initial joystick press in the ordered input
-queue. The joystick pays this setup cost once per game-mode entry.
+queue. The joystick pays this setup cost on first movement and when movement
+resumes after the idle contact has been lifted.
 
 ## Live qualification
 
@@ -121,6 +143,12 @@ spacing. Short WASD handoffs with look/lean held, neutral stopping, manual fire
 and Escape were checked in the range. With both auto-shoot options off, hovering
 over a training target did not fire or enter ADS. These are functional checks,
 not a measurement of end-to-end input latency or a guarantee of PC-like aiming.
+
+Shift sprint has offline coverage for both Shift keys, release/exit cleanup,
+diagonals, rotations and preservation of simultaneous contacts. Its default
+radius and hold/release behavior have not yet been live-qualified in the game.
+Idle contact expiration passes timer and quick-handoff regression tests, but
+the reported death/respawn issue still needs a live retest with this change.
 
 ## Diagnostic page
 
