@@ -3,6 +3,7 @@
 /profiles/
 *.hevc
 *.h265
+!src/video/fixtures/*.hevc
 *.png
 *.jpg
 *.plist
