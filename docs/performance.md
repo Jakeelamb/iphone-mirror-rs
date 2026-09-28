@@ -28,11 +28,21 @@ come from the installed 11 MiB binary in an uninstrumented release run with the 
 probe; CPU sampling and allocation tracing run separately. They do not establish
 imperceptible latency or click-to-photon latency.
 
-Formatting, all-target Clippy, 49 normal tests, and explicit hardware image
-comparisons passed. Two consecutive short sessions confirmed clean stop and reconnect. A separate
+The profiling build passed formatting, all-target Clippy, 49 normal tests, and
+explicit hardware image comparisons. Two consecutive short sessions confirmed clean stop and reconnect. A separate
 90-second isolated GUI run confirmed tap, wheel, Home, Spotlight, keyboard URL
-entry including colons, successful navigation and clean shutdown. USB and
-landscape input have not been live-qualified in the Rust application.
+entry including colons, successful navigation and clean shutdown. USB has not
+been live-qualified in the Rust application.
+
+The subsequent rounded-screen/Home and orientation changes pass 67 normal tests,
+formatting and all-target Clippy. A live Wi-Fi session confirmed orientation 3
+with a portrait-encoded buffer displayed correctly in landscape, a tap opening
+the game's Settings, vertical wheel scrolling, and a tap returning to Training.
+All four GPU rotations also passed isolated synthetic pixel checks (within
+2/255 of reference colors), with a pixel-identical upright Home strip. The other
+landscape direction and upside-down portrait have synthetic coverage, not live
+phone qualification. The timing/resource table above predates these UI changes;
+it is not a new performance measurement of the orientation build.
 
 Separately, synthetic hardware-decoded pictures matched software luma exactly.
 The isolated surface fixture matched an independent FFmpeg BT709 RGB reference
