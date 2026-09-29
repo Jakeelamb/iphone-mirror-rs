@@ -4,6 +4,10 @@ Game mode translates desktop input into touchscreen contacts. It does not use
 the game's internal APIs or inspect its state. HUD positions and the game's
 own hold/toggle settings determine what each press does.
 
+For proposed additions and a Mobile settings audit, see the dated
+[PC controls comparison](pc-controls-comparison.md). It describes research and
+future work, not additional supported bindings.
+
 ```sh
 iphone-mirror-rs --connection wifi --game-profile ~/.config/iphone-mirror-rs/rainbow-six.profile
 ```
