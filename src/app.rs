@@ -972,6 +972,7 @@ mod tests {
         let mut app = with_game();
         app.key(KeyCode::KeyW, true);
         app.key(KeyCode::KeyC, true);
+        app.key(KeyCode::KeyM, true);
         app.game_action(Action::Fire, true);
         app.key(KeyCode::KeyT, true); // Unbound keys must not leak into chat.
         let sent = events(&app);

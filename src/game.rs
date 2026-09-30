@@ -26,8 +26,9 @@ pub enum Action {
     Vault,
     Rappel,
     SecondaryGadget,
+    Mount,
 }
-const BUTTONS: [Action; 14] = [
+const BUTTONS: [Action; 15] = [
     Action::LeanLeft,
     Action::LeanRight,
     Action::Reload,
@@ -42,6 +43,7 @@ const BUTTONS: [Action; 14] = [
     Action::Vault,
     Action::Rappel,
     Action::SecondaryGadget,
+    Action::Mount,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,7 +54,7 @@ pub enum Target {
     Button(Action),
 }
 pub const REQUIRED_TARGET_COUNT: usize = 13;
-pub const CALIBRATION_TARGETS: [Target; 17] = [
+pub const CALIBRATION_TARGETS: [Target; 18] = [
     Target::Joystick,
     Target::Look,
     Target::Button(Action::LeanLeft),
@@ -69,9 +71,10 @@ pub const CALIBRATION_TARGETS: [Target; 17] = [
     Target::Button(Action::Vault),
     Target::Button(Action::Rappel),
     Target::Button(Action::SecondaryGadget),
+    Target::Button(Action::Mount),
     Target::Sprint,
 ];
-const NAMES: [&str; 17] = [
+const NAMES: [&str; 18] = [
     "joystick",
     "look",
     "lean_left",
@@ -88,6 +91,7 @@ const NAMES: [&str; 17] = [
     "vault",
     "rappel",
     "secondary_gadget",
+    "mount",
     "sprint",
 ];
 impl Target {
@@ -95,7 +99,7 @@ impl Target {
         match self {
             Self::Joystick => Some(0),
             Self::Look => Some(1),
-            Self::Sprint => Some(16),
+            Self::Sprint => Some(17),
             Self::Button(action) => BUTTONS.iter().position(|&a| a == action).map(|i| i + 2),
         }
     }
@@ -147,7 +151,7 @@ impl From<std::io::Error> for GameError {
 }
 #[derive(Clone, Debug)]
 pub struct Profile {
-    points: [Option<Point>; 17],
+    points: [Option<Point>; CALIBRATION_TARGETS.len()],
     /// Fraction of the displayed short edge per raw relative mouse unit.
     pub sensitivity: f64,
     /// Joystick displacement as a fraction of the displayed short edge.
@@ -158,7 +162,7 @@ pub struct Profile {
 impl Default for Profile {
     fn default() -> Self {
         Self {
-            points: [None; 17],
+            points: [None; CALIBRATION_TARGETS.len()],
             sensitivity: 0.002,
             joystick_radius: 0.08,
             sprint_multiplier: 2.0,
@@ -360,7 +364,7 @@ struct Contact {
 pub struct GameState {
     profile: Profile,
     contacts: [Option<Contact>; 5],
-    held: [bool; 19],
+    held: [bool; Action::Mount as usize + 1],
     look: Option<Point>,
     aspect: f64,
     rotation: u16,
@@ -375,7 +379,7 @@ impl GameState {
         Ok(Self {
             profile,
             contacts: [None; 5],
-            held: [false; 19],
+            held: [false; Action::Mount as usize + 1],
             look: None,
             aspect: 1.0,
             rotation: 0,
@@ -984,7 +988,12 @@ mod tests {
         }
         assert!(p.calibrated());
         let mut s = GameState::new(p).unwrap();
-        for action in [Action::Vault, Action::Rappel, Action::SecondaryGadget] {
+        for action in [
+            Action::Vault,
+            Action::Rappel,
+            Action::SecondaryGadget,
+            Action::Mount,
+        ] {
             let batch = s.key(action, true, 0, 0);
             assert!(matches!(batch.error, Some(GameError::Uncalibrated(_))));
             assert!(batch.events.iter().all(Option::is_none));
@@ -1018,6 +1027,28 @@ mod tests {
         assert!(contact(&released[0].1, 0).unwrap().0);
         assert!(contact(&released[0].1, 1).unwrap().0);
         assert!(!contact(&released[0].1, 4).unwrap().0);
+    }
+
+    #[test]
+    fn mount_holds_and_releases_its_target_while_movement_and_look_continue() {
+        let mut p = profile();
+        p.set_point(Target::Button(Action::Mount), Point { x: 0.7, y: 0.4 })
+            .unwrap();
+        let mut s = GameState::new(p).unwrap();
+        reports(s.key(Action::Up, true, 0, 0));
+        let looking = reports(s.motion(1.0, 0.0, 0, 1));
+        let movement = contact(&looking.last().unwrap().1, 0);
+        let look = contact(&looking.last().unwrap().1, 1);
+        let down = reports(s.key(Action::Mount, true, 0, 2));
+        let (x, y) = normalized_position(0.7, 0.4, 0).unwrap();
+        assert_eq!(contact(&down[0].1, 2), Some((true, x, y)));
+        assert_eq!(contact(&down[0].1, 0), movement);
+        assert_eq!(contact(&down[0].1, 1), look);
+        assert!(reports(s.key(Action::Mount, true, 0, 3)).is_empty());
+        let up = reports(s.key(Action::Mount, false, 0, 4));
+        assert_eq!(contact(&up[0].1, 2), Some((false, x, y)));
+        assert_eq!(contact(&up[0].1, 0), movement);
+        assert_eq!(contact(&up[0].1, 1), look);
     }
 
     #[test]
@@ -1384,6 +1415,7 @@ mod tests {
             Action::Vault,
             Action::Rappel,
             Action::SecondaryGadget,
+            Action::Mount,
         ];
         let mut state = state();
         let mut remote: [Option<(u16, u16)>; 5] = [None; 5];

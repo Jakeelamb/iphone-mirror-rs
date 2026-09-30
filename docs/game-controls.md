@@ -27,8 +27,8 @@ calibration; different layouts can use different profile files.
 
 To map one key without repeating setup, press **F10**, press the desired key,
 then click its on-screen control. Use **Space** for vault/climb, **X** for rappel,
-and **B** for a second throwable or gadget. Existing profiles can still enter
-game mode; these optional actions remain inactive until calibrated. An unmapped
+**B** for a second throwable or gadget, and **M** for mount. Existing profiles
+can still enter game mode; these optional actions remain inactive until calibrated. An unmapped
 action logs a calibration warning and sends no guessed touch. F10 calibration
 clicks stay local, save immediately, and preserve every other binding. Escape
 cancels without saving. Contextual actions must be visible at an eligible ledge
@@ -86,6 +86,7 @@ to the phone, so pending look recenters do not replay after Escape.
 | B | Second throwable / gadget (requires its own calibration) |
 | Space | Vault / climb (contextual; requires calibration) |
 | X | Rappel (contextual; requires calibration) |
+| M | Mount (requires its own calibration) |
 | 1 / 2 | Primary / secondary weapon |
 | C | Crouch |
 | Left / right mouse button | Fire / aim down sights |
@@ -127,8 +128,8 @@ tap or an intentional sprint-lock release. Ubisoft describes sprint-lock as
 Restart the viewer after editing the file.
 The optional `sprint=x,y` endpoint takes priority over `sprint_multiplier`;
 its y coordinate must be above `joystick`, and its x coordinate is not used
-to steer. Optional `vault`, `rappel`, and `secondary_gadget` fields use ordinary
-target coordinates. A key targets a HUD slot, not a named item: B may activate
+to steer. Optional `vault`, `rappel`, `secondary_gadget`, and `mount` fields use
+ordinary target coordinates. A key targets a HUD slot, not a named item: B may activate
 a different gadget on another operator. Separate profile files are appropriate
 when the layout changes. F10 saves and applies a mapping without a restart.
 
@@ -176,7 +177,7 @@ not a measurement of end-to-end input latency or a guarantee of PC-like aiming.
 Shift sprint has offline coverage for both Shift keys, release/exit cleanup,
 diagonals, rotations and preservation of simultaneous contacts. Its default
 radius did not reliably activate sprint in the user's live match. The explicit
-endpoint calibration and new vault/rappel/second-gadget bindings have offline
+endpoint calibration and new vault/rappel/second-gadget/mount bindings have offline
 coverage but still require live HUD calibration and gameplay verification.
 Idle contact expiration passes timer and quick-handoff regression tests, but
 the reported death/respawn issue still needs a live retest with this change.

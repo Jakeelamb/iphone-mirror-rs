@@ -134,6 +134,7 @@ fn target_label(target: Target) -> &'static str {
             Action::Vault => "vault / climb (Space)",
             Action::Rappel => "rappel (X)",
             Action::SecondaryGadget => "second throwable / gadget (B)",
+            Action::Mount => "mount (M)",
             _ => "movement joystick center",
         },
     }
@@ -157,6 +158,7 @@ pub fn action(code: KeyCode) -> Option<Action> {
         KeyCode::Space => Action::Vault,
         KeyCode::KeyX => Action::Rappel,
         KeyCode::KeyB => Action::SecondaryGadget,
+        KeyCode::KeyM => Action::Mount,
         _ => return None,
     })
 }
@@ -191,6 +193,11 @@ mod tests {
                 Point { x: 0.6, y: 0.4 },
             ),
             (KeyCode::ShiftLeft, Target::Sprint, Point { x: 0.2, y: 0.3 }),
+            (
+                KeyCode::KeyM,
+                Target::Button(Action::Mount),
+                Point { x: 0.8, y: 0.4 },
+            ),
         ] {
             game.start_target_calibration();
             game.calibrate(0.9, 0.9)?; // No target selected: ignore click.
@@ -221,6 +228,7 @@ mod tests {
         assert_eq!(action(KeyCode::Space), Some(Action::Vault));
         assert_eq!(action(KeyCode::KeyX), Some(Action::Rappel));
         assert_eq!(action(KeyCode::KeyB), Some(Action::SecondaryGadget));
+        assert_eq!(action(KeyCode::KeyM), Some(Action::Mount));
         assert_eq!(action(KeyCode::KeyG), Some(Action::Grenade));
         assert_eq!(action(KeyCode::KeyF), Some(Action::Interact));
     }
