@@ -2,6 +2,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use iphone_mirror_rs::game::bindings::{self, Binding, Input};
 use iphone_mirror_rs::game::{
     Action, CALIBRATION_TARGETS, GameState, Point, Profile, REQUIRED_TARGET_COUNT, Target,
 };
@@ -17,7 +18,7 @@ pub struct GameControls {
 pub enum Calibration {
     Sequence(usize, Box<Profile>),
     SelectTarget,
-    Single(Target),
+    Single(Target, Option<Binding>),
 }
 
 impl GameControls {
@@ -38,8 +39,16 @@ impl GameControls {
     pub fn title(&self) -> String {
         if let Some(calibration) = &self.calibration {
             match calibration {
-                Calibration::SelectTarget => "PRESS A BOUND KEY TO CALIBRATE - ESC CANCEL".into(),
-                Calibration::Single(target) => {
+                Calibration::SelectTarget => {
+                    "PRESS KEY OR MOUSE BUTTON / WHEEL - ESC CANCEL".into()
+                }
+                Calibration::Single(target, binding) => {
+                    if let Some(binding) = binding {
+                        return format!(
+                            "CLICK HUD TARGET FOR {} - ESC CANCEL",
+                            binding.input.name()
+                        );
+                    }
                     format!("CLICK {} - ESC CANCEL", target_label(*target))
                 }
                 Calibration::Sequence(index, _) => format!(
@@ -52,7 +61,7 @@ impl GameControls {
         } else if self.state.is_some() {
             "GAME - ESC RELEASES MOUSE - F8 EXITS".into()
         } else if self.profile.calibrated() {
-            "F8 PLAY - F9 SETUP - F10 MAP KEY".into()
+            "F8 PLAY - F9 SETUP - F10 MAP INPUT".into()
         } else {
             "F9 CALIBRATE GAME CONTROLS".into()
         }
@@ -67,23 +76,53 @@ impl GameControls {
     }
 
     pub fn select_calibration_key(&mut self, code: KeyCode) {
-        if !matches!(
-            self.calibration,
-            Some(Calibration::SelectTarget | Calibration::Single(_))
-        ) {
+        self.select_calibration_input(Input::Key(code));
+    }
+
+    pub fn select_calibration_input(&mut self, input: Input) {
+        if input.reserved()
+            || !matches!(
+                self.calibration,
+                Some(Calibration::SelectTarget | Calibration::Single(..))
+            )
+        {
             return;
         }
-        let target = if matches!(code, KeyCode::ShiftLeft | KeyCode::ShiftRight) {
-            Some(Target::Sprint)
+        let resolved = bindings::resolve(&self.profile.bindings, input);
+        let (target, binding) = if let Some(action) = resolved {
+            (
+                match action {
+                    Action::Up | Action::Down | Action::Left | Action::Right => Target::Joystick,
+                    Action::Sprint => Target::Sprint,
+                    _ => Target::Button(action),
+                },
+                None,
+            )
         } else {
-            action(code).map(|action| match action {
-                Action::Up | Action::Down | Action::Left | Action::Right => Target::Joystick,
-                _ => Target::Button(action),
-            })
+            let Some(index) = (0..iphone_mirror_rs::game::CUSTOM_TARGET_COUNT).find(|&i| {
+                let action = Action::Custom(i as u8);
+                self.profile.point(Target::Button(action)).is_none()
+                    && !self
+                        .profile
+                        .bindings
+                        .iter()
+                        .any(|b| b.action == Some(action))
+            }) else {
+                tracing::warn!(
+                    "all custom HUD targets are in use; reuse an existing action with a profile binding"
+                );
+                return;
+            };
+            let action = Action::Custom(index as u8);
+            (
+                Target::Button(action),
+                Some(Binding {
+                    input,
+                    action: Some(action),
+                }),
+            )
         };
-        if let Some(target) = target {
-            self.calibration = Some(Calibration::Single(target));
-        }
+        self.calibration = Some(Calibration::Single(target, binding));
     }
 
     /// Calibration consumes clicks locally. No touch reaches the phone.
@@ -97,9 +136,20 @@ impl GameControls {
                 }
                 profile.as_ref().clone()
             }
-            Some(Calibration::Single(target)) => {
+            Some(Calibration::Single(target, binding)) => {
                 let mut profile = self.profile.clone();
                 profile.set_point(*target, Point { x, y })?;
+                if let Some(binding) = binding {
+                    if let Some(existing) = profile
+                        .bindings
+                        .iter_mut()
+                        .find(|b| b.input == binding.input)
+                    {
+                        *existing = *binding;
+                    } else {
+                        profile.bindings.push(*binding);
+                    }
+                }
                 profile
             }
             _ => return Ok(()),
@@ -140,32 +190,46 @@ fn target_label(target: Target) -> &'static str {
     }
 }
 
-pub fn action(code: KeyCode) -> Option<Action> {
-    Some(match code {
-        KeyCode::KeyW => Action::Up,
-        KeyCode::KeyA => Action::Left,
-        KeyCode::KeyS => Action::Down,
-        KeyCode::KeyD => Action::Right,
-        KeyCode::KeyQ => Action::LeanLeft,
-        KeyCode::KeyE => Action::LeanRight,
-        KeyCode::KeyR => Action::Reload,
-        KeyCode::KeyF => Action::Interact,
-        KeyCode::KeyV => Action::Melee,
-        KeyCode::KeyG => Action::Grenade,
-        KeyCode::Digit1 => Action::Primary,
-        KeyCode::Digit2 => Action::Secondary,
-        KeyCode::KeyC => Action::Crouch,
-        KeyCode::Space => Action::Vault,
-        KeyCode::KeyX => Action::Rappel,
-        KeyCode::KeyB => Action::SecondaryGadget,
-        KeyCode::KeyM => Action::Mount,
-        _ => return None,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn arbitrary_keys_and_every_mouse_kind_calibrate_and_persist_independently() -> Result<()> {
+        use bindings::WheelDirection;
+        use winit::event::MouseButton;
+        let path =
+            std::env::temp_dir().join(format!("mirror-custom-{}.profile", uuid::Uuid::new_v4()));
+        let mut game = GameControls::load(path.clone())?;
+        let inputs = [
+            Input::Key(KeyCode::KeyT),
+            Input::Key(KeyCode::Numpad7),
+            Input::Mouse(MouseButton::Middle),
+            Input::Mouse(MouseButton::Back),
+            Input::Mouse(MouseButton::Forward),
+            Input::Mouse(MouseButton::Other(8)),
+            Input::Wheel(WheelDirection::Up),
+        ];
+        for (i, input) in inputs.into_iter().enumerate() {
+            game.start_target_calibration();
+            game.select_calibration_input(input);
+            let point = Point {
+                x: 0.1 * i as f64,
+                y: 0.4,
+            };
+            game.calibrate(point.x, point.y)?;
+            let loaded = Profile::load(&path)?;
+            let action = bindings::resolve(&loaded.bindings, input)
+                .ok_or_else(|| anyhow::anyhow!("missing saved binding"))?;
+            assert_eq!(action, Action::Custom(i as u8));
+            assert_eq!(loaded.point(Target::Button(action)), Some(point));
+        }
+        game.start_target_calibration();
+        game.select_calibration_input(Input::Key(KeyCode::Escape));
+        assert!(matches!(game.calibration, Some(Calibration::SelectTarget)));
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
 
     #[test]
     fn targeted_calibration_saves_only_the_selected_binding() -> Result<()> {
@@ -225,11 +289,26 @@ mod tests {
 
     #[test]
     fn new_bindings_are_independent_of_existing_grenade_and_interact() {
-        assert_eq!(action(KeyCode::Space), Some(Action::Vault));
-        assert_eq!(action(KeyCode::KeyX), Some(Action::Rappel));
-        assert_eq!(action(KeyCode::KeyB), Some(Action::SecondaryGadget));
-        assert_eq!(action(KeyCode::KeyM), Some(Action::Mount));
-        assert_eq!(action(KeyCode::KeyG), Some(Action::Grenade));
-        assert_eq!(action(KeyCode::KeyF), Some(Action::Interact));
+        assert_eq!(
+            bindings::default_action(KeyCode::Space),
+            Some(Action::Vault)
+        );
+        assert_eq!(
+            bindings::default_action(KeyCode::KeyX),
+            Some(Action::Rappel)
+        );
+        assert_eq!(
+            bindings::default_action(KeyCode::KeyB),
+            Some(Action::SecondaryGadget)
+        );
+        assert_eq!(bindings::default_action(KeyCode::KeyM), Some(Action::Mount));
+        assert_eq!(
+            bindings::default_action(KeyCode::KeyG),
+            Some(Action::Grenade)
+        );
+        assert_eq!(
+            bindings::default_action(KeyCode::KeyF),
+            Some(Action::Interact)
+        );
     }
 }

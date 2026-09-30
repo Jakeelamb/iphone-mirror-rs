@@ -4,6 +4,9 @@ Research date: 2026-09-29. Implementation baseline: `0f701e5`.
 This is a comparison and proposed test plan, not implemented functionality or
 evidence of current in-game settings. No phone input was sent for this audit.
 See [game controls](game-controls.md) for supported behavior and calibration.
+The hardcoded-binding limitation below describes that baseline. Configurable
+keyboard/mouse bindings have since been implemented; see the current game
+controls guide for their configuration and remaining qualification limits.
 
 ## PC reference and existing coverage
 

@@ -4,6 +4,11 @@ use std::path::Path;
 
 use crate::input::{HidEvent, TouchPhase, normalized_position};
 
+pub mod bindings;
+use bindings::Binding;
+pub const CUSTOM_TARGET_COUNT: usize = 64;
+pub const ACTION_COUNT: usize = 20 + CUSTOM_TARGET_COUNT;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Action {
@@ -27,6 +32,34 @@ pub enum Action {
     Rappel,
     SecondaryGadget,
     Mount,
+    Custom(u8),
+}
+impl Action {
+    pub fn index(self) -> usize {
+        match self {
+            Self::Up => 0,
+            Self::Down => 1,
+            Self::Left => 2,
+            Self::Right => 3,
+            Self::LeanLeft => 4,
+            Self::LeanRight => 5,
+            Self::Reload => 6,
+            Self::Interact => 7,
+            Self::Melee => 8,
+            Self::Grenade => 9,
+            Self::Primary => 10,
+            Self::Secondary => 11,
+            Self::Crouch => 12,
+            Self::Fire => 13,
+            Self::Aim => 14,
+            Self::Sprint => 15,
+            Self::Vault => 16,
+            Self::Rappel => 17,
+            Self::SecondaryGadget => 18,
+            Self::Mount => 19,
+            Self::Custom(i) => 20 + usize::from(i),
+        }
+    }
 }
 const BUTTONS: [Action; 15] = [
     Action::LeanLeft,
@@ -54,7 +87,7 @@ pub enum Target {
     Button(Action),
 }
 pub const REQUIRED_TARGET_COUNT: usize = 13;
-pub const CALIBRATION_TARGETS: [Target; 18] = [
+pub const CALIBRATION_TARGETS: [Target; 18 + CUSTOM_TARGET_COUNT] = [
     Target::Joystick,
     Target::Look,
     Target::Button(Action::LeanLeft),
@@ -73,8 +106,72 @@ pub const CALIBRATION_TARGETS: [Target; 18] = [
     Target::Button(Action::SecondaryGadget),
     Target::Button(Action::Mount),
     Target::Sprint,
+    Target::Button(Action::Custom(0)),
+    Target::Button(Action::Custom(1)),
+    Target::Button(Action::Custom(2)),
+    Target::Button(Action::Custom(3)),
+    Target::Button(Action::Custom(4)),
+    Target::Button(Action::Custom(5)),
+    Target::Button(Action::Custom(6)),
+    Target::Button(Action::Custom(7)),
+    Target::Button(Action::Custom(8)),
+    Target::Button(Action::Custom(9)),
+    Target::Button(Action::Custom(10)),
+    Target::Button(Action::Custom(11)),
+    Target::Button(Action::Custom(12)),
+    Target::Button(Action::Custom(13)),
+    Target::Button(Action::Custom(14)),
+    Target::Button(Action::Custom(15)),
+    Target::Button(Action::Custom(16)),
+    Target::Button(Action::Custom(17)),
+    Target::Button(Action::Custom(18)),
+    Target::Button(Action::Custom(19)),
+    Target::Button(Action::Custom(20)),
+    Target::Button(Action::Custom(21)),
+    Target::Button(Action::Custom(22)),
+    Target::Button(Action::Custom(23)),
+    Target::Button(Action::Custom(24)),
+    Target::Button(Action::Custom(25)),
+    Target::Button(Action::Custom(26)),
+    Target::Button(Action::Custom(27)),
+    Target::Button(Action::Custom(28)),
+    Target::Button(Action::Custom(29)),
+    Target::Button(Action::Custom(30)),
+    Target::Button(Action::Custom(31)),
+    Target::Button(Action::Custom(32)),
+    Target::Button(Action::Custom(33)),
+    Target::Button(Action::Custom(34)),
+    Target::Button(Action::Custom(35)),
+    Target::Button(Action::Custom(36)),
+    Target::Button(Action::Custom(37)),
+    Target::Button(Action::Custom(38)),
+    Target::Button(Action::Custom(39)),
+    Target::Button(Action::Custom(40)),
+    Target::Button(Action::Custom(41)),
+    Target::Button(Action::Custom(42)),
+    Target::Button(Action::Custom(43)),
+    Target::Button(Action::Custom(44)),
+    Target::Button(Action::Custom(45)),
+    Target::Button(Action::Custom(46)),
+    Target::Button(Action::Custom(47)),
+    Target::Button(Action::Custom(48)),
+    Target::Button(Action::Custom(49)),
+    Target::Button(Action::Custom(50)),
+    Target::Button(Action::Custom(51)),
+    Target::Button(Action::Custom(52)),
+    Target::Button(Action::Custom(53)),
+    Target::Button(Action::Custom(54)),
+    Target::Button(Action::Custom(55)),
+    Target::Button(Action::Custom(56)),
+    Target::Button(Action::Custom(57)),
+    Target::Button(Action::Custom(58)),
+    Target::Button(Action::Custom(59)),
+    Target::Button(Action::Custom(60)),
+    Target::Button(Action::Custom(61)),
+    Target::Button(Action::Custom(62)),
+    Target::Button(Action::Custom(63)),
 ];
-const NAMES: [&str; 18] = [
+const NAMES: [&str; 18 + CUSTOM_TARGET_COUNT] = [
     "joystick",
     "look",
     "lean_left",
@@ -93,6 +190,70 @@ const NAMES: [&str; 18] = [
     "secondary_gadget",
     "mount",
     "sprint",
+    "custom0",
+    "custom1",
+    "custom2",
+    "custom3",
+    "custom4",
+    "custom5",
+    "custom6",
+    "custom7",
+    "custom8",
+    "custom9",
+    "custom10",
+    "custom11",
+    "custom12",
+    "custom13",
+    "custom14",
+    "custom15",
+    "custom16",
+    "custom17",
+    "custom18",
+    "custom19",
+    "custom20",
+    "custom21",
+    "custom22",
+    "custom23",
+    "custom24",
+    "custom25",
+    "custom26",
+    "custom27",
+    "custom28",
+    "custom29",
+    "custom30",
+    "custom31",
+    "custom32",
+    "custom33",
+    "custom34",
+    "custom35",
+    "custom36",
+    "custom37",
+    "custom38",
+    "custom39",
+    "custom40",
+    "custom41",
+    "custom42",
+    "custom43",
+    "custom44",
+    "custom45",
+    "custom46",
+    "custom47",
+    "custom48",
+    "custom49",
+    "custom50",
+    "custom51",
+    "custom52",
+    "custom53",
+    "custom54",
+    "custom55",
+    "custom56",
+    "custom57",
+    "custom58",
+    "custom59",
+    "custom60",
+    "custom61",
+    "custom62",
+    "custom63",
 ];
 impl Target {
     fn index(self) -> Option<usize> {
@@ -100,6 +261,9 @@ impl Target {
             Self::Joystick => Some(0),
             Self::Look => Some(1),
             Self::Sprint => Some(17),
+            Self::Button(Action::Custom(i)) if usize::from(i) < CUSTOM_TARGET_COUNT => {
+                Some(18 + usize::from(i))
+            }
             Self::Button(action) => BUTTONS.iter().position(|&a| a == action).map(|i| i + 2),
         }
     }
@@ -151,6 +315,7 @@ impl From<std::io::Error> for GameError {
 }
 #[derive(Clone, Debug)]
 pub struct Profile {
+    pub bindings: Vec<Binding>,
     points: [Option<Point>; CALIBRATION_TARGETS.len()],
     /// Fraction of the displayed short edge per raw relative mouse unit.
     pub sensitivity: f64,
@@ -162,6 +327,7 @@ pub struct Profile {
 impl Default for Profile {
     fn default() -> Self {
         Self {
+            bindings: Vec::new(),
             points: [None; CALIBRATION_TARGETS.len()],
             sensitivity: 0.002,
             joystick_radius: 0.08,
@@ -217,6 +383,7 @@ impl Profile {
                 "sprint_multiplier must be within 1..4",
             ));
         }
+        bindings::validate(&self.bindings)?;
         Ok(())
     }
     /// Versioned text; absent targets remain uncalibrated, never guessed.
@@ -235,6 +402,17 @@ impl Profile {
                 .split_once('=')
                 .ok_or(GameError::InvalidProfile("expected name=value"))?;
             let (name, value) = (name.trim(), value.trim());
+            if let Some(input) = name.strip_prefix("bind.") {
+                let binding = Binding::parse(input, value)?;
+                if profile.bindings.iter().any(|b| b.input == binding.input) {
+                    return Err(GameError::InvalidProfile("duplicate input binding"));
+                }
+                profile.bindings.push(binding);
+                if profile.bindings.len() > bindings::MAX_BINDINGS {
+                    return Err(GameError::InvalidProfile("too many input bindings"));
+                }
+                continue;
+            }
             match name {
                 "version" if !version && value == "1" => version = true,
                 "sensitivity" if !sensitivity => {
@@ -320,6 +498,14 @@ impl Profile {
                     writeln!(file, "{}={},{}", NAMES[i], p.x, p.y)?;
                 }
             }
+            for binding in &self.bindings {
+                writeln!(
+                    file,
+                    "bind.{}={}",
+                    binding.input.name(),
+                    binding.action_name()
+                )?;
+            }
             file.sync_all()?;
             std::fs::rename(&temporary, path)
         })();
@@ -364,7 +550,7 @@ struct Contact {
 pub struct GameState {
     profile: Profile,
     contacts: [Option<Contact>; 5],
-    held: [bool; Action::Mount as usize + 1],
+    held: [bool; ACTION_COUNT],
     look: Option<Point>,
     aspect: f64,
     rotation: u16,
@@ -379,7 +565,7 @@ impl GameState {
         Ok(Self {
             profile,
             contacts: [None; 5],
-            held: [false; Action::Mount as usize + 1],
+            held: [false; ACTION_COUNT],
             look: None,
             aspect: 1.0,
             rotation: 0,
@@ -456,11 +642,15 @@ impl GameState {
         timestamp: u64,
     ) -> EventBatch {
         let mut batch = self.orient(rotation, timestamp);
-        if self.held[action as usize] == pressed {
+        if action.index() >= ACTION_COUNT {
+            batch.error = Some(GameError::InvalidProfile("invalid custom action"));
             return batch;
         }
-        if (action as usize) < 4 || action == Action::Sprint {
-            self.held[action as usize] = pressed;
+        if self.held[action.index()] == pressed {
+            return batch;
+        }
+        if action.index() < 4 || action == Action::Sprint {
+            self.held[action.index()] = pressed;
             let center = self.point(Target::Joystick);
             // Shift alone never begins a gesture or starts moving.
             if action == Action::Sprint && self.contacts[0].is_none() {
@@ -477,13 +667,13 @@ impl GameState {
             } else {
                 self.movement_idle_since.get_or_insert(timestamp);
             }
-            let dx = i32::from(self.held[Action::Right as usize])
-                - i32::from(self.held[Action::Left as usize]);
-            let dy = i32::from(self.held[Action::Down as usize])
-                - i32::from(self.held[Action::Up as usize]);
+            let dx = i32::from(self.held[Action::Right.index()])
+                - i32::from(self.held[Action::Left.index()]);
+            let dy = i32::from(self.held[Action::Down.index()])
+                - i32::from(self.held[Action::Up.index()]);
             let norm = f64::from(dx * dx + dy * dy).sqrt().max(1.0);
             let (sx, sy) = self.scale();
-            let radius = if self.held[Action::Sprint as usize] && dy < 0 {
+            let radius = if self.held[Action::Sprint.index()] && dy < 0 {
                 self.profile.point(Target::Sprint).map_or_else(
                     || (self.profile.joystick_radius * self.profile.sprint_multiplier).min(0.5),
                     |endpoint| (center.y - endpoint.y) / sy,
@@ -507,11 +697,11 @@ impl GameState {
                 batch.error = Some(GameError::Capacity);
                 return batch;
             };
-            self.held[action as usize] = true;
+            self.held[action.index()] = true;
             self.contacts[id] = Some(self.contact(point, Some(action)));
             batch.push(self.report(TouchPhase::Begin, 0, timestamp));
         } else {
-            self.held[action as usize] = false;
+            self.held[action.index()] = false;
             if let Some(id) =
                 (2..5).find(|&id| self.contacts[id].is_some_and(|c| c.action == Some(action)))
             {
@@ -1416,6 +1606,9 @@ mod tests {
             Action::Rappel,
             Action::SecondaryGadget,
             Action::Mount,
+            Action::Custom(0),
+            Action::Custom(31),
+            Action::Custom(63),
         ];
         let mut state = state();
         let mut remote: [Option<(u16, u16)>; 5] = [None; 5];
@@ -1512,7 +1705,7 @@ mod tests {
             assert_eq!(state.contacts[1].is_some(), state.look.is_some());
             for action in BUTTONS {
                 assert_eq!(
-                    state.held[action as usize],
+                    state.held[action.index()],
                     state.contacts[2..]
                         .iter()
                         .flatten()

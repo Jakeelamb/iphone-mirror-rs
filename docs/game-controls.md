@@ -25,14 +25,26 @@ These calibration clicks stay in the viewer; they do not tap the phone.
 Escape cancels. The final click saves the profile atomically. F9 repeats the
 calibration; different layouts can use different profile files.
 
-To map one key without repeating setup, press **F10**, press the desired key,
-then click its on-screen control. Use **Space** for vault/climb, **X** for rappel,
-**B** for a second throwable or gadget, and **M** for mount. Existing profiles
-can still enter game mode; these optional actions remain inactive until calibrated. An unmapped
-action logs a calibration warning and sends no guessed touch. F10 calibration
-clicks stay local, save immediately, and preserve every other binding. Escape
-cancels without saving. Contextual actions must be visible at an eligible ledge
-or wall, or exposed in the game's HUD editor.
+To map an input without repeating setup, press **F10**, press the desired key,
+mouse button, or wheel direction, then **left-click its on-screen control**.
+Mouse inputs need two steps: the first click selects the input; the next left
+click sets the target. Calibration clicks stay local and never tap the phone.
+Any physical key reported by the viewer, middle/side mouse buttons, additional
+numbered mouse buttons, and vertical/horizontal wheel directions are supported.
+Escape and F8/F9/F10 remain reserved for release and setup.
+
+Previously unbound inputs create an independent HUD target, saved as a
+`custom0` through `custom63` action. Repeating F10 for that input moves its
+existing target. There are 64 custom targets and at most 512 explicit bindings.
+Existing bindings retain their action: for example, M calibrates mount, WASD
+calibrates the joystick center, and Shift calibrates sprint. To change an
+existing key's action or add aliases, use the profile overrides below.
+
+The default optional actions are **Space** vault/climb, **X** rappel, **B** second
+gadget, and **M** mount. They remain inactive until calibrated; the viewer sends
+no guessed touch. F10 saves and applies immediately. Escape cancels without
+saving. Contextual actions must be visible at an eligible ledge/wall or exposed
+in the game's HUD editor.
 
 For sprint, use **F10 → Shift → click the forward sprint endpoint above the
 joystick**. Its vertical distance replaces the default sprint multiplier;
@@ -93,9 +105,47 @@ to the phone, so pending look recenters do not replay after Escape.
 | Mouse motion | Drag in the calibrated looking area |
 
 A bound button stays touched until its key/button is released. Choose hold or
-toggle behavior in the game's settings. Unbound keys and the scroll wheel are
-suppressed while captured, so movement keys cannot accidentally type into a
-text field. Exit game mode to use menus or normal keyboard input.
+toggle behavior in the game's settings. Multiple inputs bound to the same
+action share one contact; it lifts only when every held alias is released.
+Wheel bindings send a 30 ms tap; repeated ticks extend that tap, rather than
+queueing future taps. Wheel directions cannot bind movement or sprint. Unbound
+inputs are suppressed while captured, so keys cannot type into a text field.
+Exit game mode to use menus or normal keyboard input.
+
+## Rebind keys and mouse buttons
+
+Profiles accept `bind.INPUT=ACTION` overrides alongside target coordinates.
+Input names use physical keyboard codes (`key.KeyT`, `key.ControlLeft`,
+`key.ArrowUp`, `key.Numpad7`, `key.F12`), mouse names (`mouse.Left`, `Right`,
+`Middle`, `Back`, `Forward`, `Other8`, each prefixed with `mouse.`), or
+`wheel.Up`, `Down`, `Left`, `Right`, each prefixed with `wheel.`. F10's title
+shows the selected input name for a new custom binding. Keys intercepted by
+the desktop or not reported by the input backend cannot reach the viewer.
+
+Actions are `up`, `down`, `left`, `right`, `sprint`, the named button fields
+(`fire`, `aim`, `reload`, `mount`, etc.), or a calibrated `custom0`..`custom63`.
+Use `none` to disable an input. For example:
+
+```ini
+# Add arrow movement and a mouse-side reload alias.
+bind.key.ArrowUp=up
+bind.mouse.Back=reload
+# Replace the old R reload key and add a middle-button ability target.
+bind.key.KeyR=none
+bind.mouse.Middle=custom0
+custom0=0.8,0.3
+# Use wheel directions for calibrated weapon slots.
+bind.wheel.Up=primary
+bind.wheel.Down=secondary
+```
+
+The example coordinate is illustrative; use F10 or your actual HUD coordinate.
+Removing an override restores that input's default action. Editing the file
+requires restarting the viewer; F10 calibration does not. Duplicate inputs,
+unknown actions/keys and reserved-key overrides are rejected. F1/F2 retain
+Home/Spotlight unless explicitly bound in game mode. Distinct actions mapped
+to the same coordinate are separate touches; use the same action name for
+aliases. The five-contact limit still applies, including three button contacts.
 
 Releasing WASD immediately centers the joystick, then lifts its touch after
 150 ms with no movement keys held. A direction change within that grace period
@@ -179,6 +229,9 @@ diagonals, rotations and preservation of simultaneous contacts. Its default
 radius did not reliably activate sprint in the user's live match. The explicit
 endpoint calibration and new vault/rappel/second-gadget/mount bindings have offline
 coverage but still require live HUD calibration and gameplay verification.
+Configurable key/mouse bindings have offline coverage for calibration and
+persistence, alias ownership, wheel expiry, and release cleanup. Arbitrary new
+HUD actions and individual mouse hardware still require live qualification.
 Idle contact expiration passes timer and quick-handoff regression tests, but
 the reported death/respawn issue still needs a live retest with this change.
 

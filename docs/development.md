@@ -19,6 +19,7 @@ source because `idevice`'s native CoreDevice APIs are pinned to a Git revision.
 | `src/video/layout.rs` | Shared DPI-aware screen/button geometry and pointer hit testing |
 | `src/input.rs` | HID encoding, contact/key state and bounded input queue |
 | `src/game.rs` | Calibrated five-contact mapping, full touch snapshots and profile persistence |
+| `src/game/bindings.rs` | Input overrides, physical key/mouse names and aggregate alias ownership |
 | `src/game_ui.rs` | Calibration steps and physical game-key bindings |
 | `src/app.rs` | winit window events, coordinate mapping and controls |
 | `src/metrics.rs` | Fixed-size counters, timing histograms and optional synthetic timestamp recognition |

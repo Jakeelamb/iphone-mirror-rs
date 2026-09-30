@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
+use iphone_mirror_rs::game::bindings::{self, Input, RuntimeBindings, WheelDirection};
 use iphone_mirror_rs::game::{Action, EventBatch, GameState};
 use iphone_mirror_rs::input::{
     HidEvent, InputState, TouchPhase, TouchSample, ascii_usage, normalized_position, wheel_gesture,
@@ -57,7 +58,8 @@ pub struct App {
     rotation: u16,
     display_size: Option<(u32, u32)>,
     focused: bool,
-    game_shifts: [bool; 2],
+    game_bindings: RuntimeBindings,
+    game_wheel_deadlines: [Option<u64>; 4],
     pub game: Option<crate::game_ui::GameControls>,
     pub presentation: PresentationOptions,
     pub failed: bool,
@@ -96,7 +98,8 @@ impl App {
             rotation: 0,
             display_size: None,
             focused: false,
-            game_shifts: [false; 2],
+            game_bindings: RuntimeBindings::new(),
+            game_wheel_deadlines: [None; 4],
             game: None,
             presentation: PresentationOptions::default(),
             failed: false,
@@ -433,7 +436,8 @@ impl App {
     }
 
     fn exit_game(&mut self) {
-        self.game_shifts.fill(false);
+        self.game_bindings.clear();
+        self.game_wheel_deadlines.fill(None);
         let timestamp = self.timestamp();
         if self
             .game
@@ -533,7 +537,12 @@ impl App {
                 }
                 true
             }
-            KeyCode::F1 | KeyCode::F2 if self.game_active() => {
+            KeyCode::F1 | KeyCode::F2
+                if self.game_active()
+                    && self.game.as_ref().is_some_and(|g| {
+                        bindings::resolve(&g.profile.bindings, Input::Key(code)).is_none()
+                    }) =>
+            {
                 self.exit_game();
                 false
             }
@@ -547,12 +556,7 @@ impl App {
                 true
             }
             _ if self.game_active() => {
-                if matches!(code, KeyCode::ShiftLeft | KeyCode::ShiftRight) {
-                    self.game_shifts[usize::from(code == KeyCode::ShiftRight)] = pressed;
-                    self.game_action(Action::Sprint, self.game_shifts.iter().any(|&held| held));
-                } else if let Some(action) = crate::game_ui::action(code) {
-                    self.game_action(action, pressed);
-                }
+                self.game_input(Input::Key(code), pressed);
                 true
             }
             _ => self.game.as_ref().is_some_and(|g| g.calibration.is_some()),
@@ -567,11 +571,100 @@ impl App {
         }
     }
 
+    fn game_input(&mut self, input: Input, pressed: bool) {
+        let transition = self.game.as_ref().and_then(|game| {
+            self.game_bindings
+                .event(&game.profile.bindings, input, pressed)
+        });
+        if let Some((action, pressed)) = transition {
+            self.game_action(action, pressed);
+        }
+    }
+
+    fn game_mouse(&mut self, button: MouseButton, pressed: bool) -> bool {
+        if self.game_active() {
+            self.game_input(Input::Mouse(button), pressed);
+            return true;
+        }
+        if self.game.as_ref().is_some_and(|g| g.calibration.is_some()) {
+            if pressed {
+                let selecting = self.game.as_ref().is_some_and(|g| {
+                    matches!(
+                        g.calibration,
+                        Some(crate::game_ui::Calibration::SelectTarget)
+                    )
+                });
+                if selecting {
+                    if let Some(game) = &mut self.game {
+                        game.select_calibration_input(Input::Mouse(button));
+                    }
+                } else if button == MouseButton::Left
+                    && let Some((x, y)) = self.position(false)
+                    && let Some(game) = &mut self.game
+                    && let Err(error) = game.calibrate(x, y)
+                {
+                    tracing::warn!(%error, "calibration failed");
+                }
+                self.update_title();
+            }
+            return true;
+        }
+        false
+    }
+
+    fn game_wheel(&mut self, x: f64, y: f64) -> bool {
+        if !self.game_active() && self.game.as_ref().is_none_or(|g| g.calibration.is_none()) {
+            return false;
+        }
+        for (i, delta) in [y, -y, -x, x].into_iter().enumerate() {
+            if !delta.is_finite() || delta <= 0.0 {
+                continue;
+            }
+            let direction = [
+                WheelDirection::Up,
+                WheelDirection::Down,
+                WheelDirection::Left,
+                WheelDirection::Right,
+            ][i];
+            let input = Input::Wheel(direction);
+            if self.game_active() {
+                self.game_input(input, true);
+                // A wheel has no release event. Bound taps last 30 ms, with
+                // repeated ticks extending that hold rather than queuing taps.
+                self.game_wheel_deadlines[i] = Some(self.timestamp().saturating_add(30_000_000));
+            } else if let Some(game) = &mut self.game {
+                game.select_calibration_input(input);
+                self.update_title();
+                break;
+            }
+        }
+        true
+    }
+
     fn advance_game(&mut self) -> Option<Instant> {
         let timestamp = self.timestamp();
+        if !self.game_active() {
+            return None;
+        }
+        for i in 0..4 {
+            if self.game_wheel_deadlines[i].is_some_and(|at| at <= timestamp) {
+                self.game_wheel_deadlines[i] = None;
+                let direction = [
+                    WheelDirection::Up,
+                    WheelDirection::Down,
+                    WheelDirection::Left,
+                    WheelDirection::Right,
+                ][i];
+                self.game_input(Input::Wheel(direction), false);
+            }
+        }
         let state = self.game.as_mut()?.state.as_mut()?;
         let batch = state.expire_idle_movement(timestamp);
-        let deadline = state.movement_deadline();
+        let deadline = state
+            .movement_deadline()
+            .into_iter()
+            .chain(self.game_wheel_deadlines.iter().flatten().copied())
+            .min();
         self.send_game(batch);
         deadline.and_then(|at| self.clock.checked_add(Duration::from_nanos(at)))
     }
@@ -716,28 +809,10 @@ impl ApplicationHandler<AppEvent> for App {
                 self.update_home_visual();
             }
             WindowEvent::MouseInput { state, button, .. } if self.focused && self.connected => {
-                if self.game_active() {
-                    match button {
-                        MouseButton::Left => self.game_action(Action::Fire, state.is_pressed()),
-                        MouseButton::Right => self.game_action(Action::Aim, state.is_pressed()),
-                        _ => {}
-                    }
+                if self.game_mouse(button, state.is_pressed()) {
                     return;
                 }
                 if button != MouseButton::Left {
-                    return;
-                }
-                if self.game.as_ref().is_some_and(|g| g.calibration.is_some()) {
-                    if state.is_pressed()
-                        && let Some((x, y)) = self.position(false)
-                    {
-                        if let Some(game) = &mut self.game
-                            && let Err(error) = game.calibrate(x, y)
-                        {
-                            tracing::warn!(%error, "calibration failed");
-                        }
-                        self.update_title();
-                    }
                     return;
                 }
                 let position = self
@@ -747,14 +822,14 @@ impl ApplicationHandler<AppEvent> for App {
                 self.update_home_visual();
             }
             WindowEvent::MouseWheel { delta, .. } if self.focused && self.connected => {
-                if self.game_active() || self.game.as_ref().is_some_and(|g| g.calibration.is_some())
-                {
+                let (x, y) = match delta {
+                    MouseScrollDelta::LineDelta(x, y) => (f64::from(x), f64::from(y)),
+                    MouseScrollDelta::PixelDelta(p) => (p.x / 50.0, p.y / 50.0),
+                };
+                if self.game_wheel(x, y) {
                     return;
                 }
-                let lines = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => f64::from(y),
-                    MouseScrollDelta::PixelDelta(p) => p.y / 50.0,
-                };
+                let lines = y;
                 self.pending_scroll = (self.pending_scroll + lines).clamp(-4.0, 4.0);
                 self.start_scroll();
             }
@@ -952,10 +1027,13 @@ mod tests {
         use iphone_mirror_rs::game::{CALIBRATION_TARGETS, Point, Profile};
         let mut app = app();
         let mut profile = Profile::default();
-        for target in CALIBRATION_TARGETS
-            .into_iter()
-            .filter(|&target| target != iphone_mirror_rs::game::Target::Sprint)
-        {
+        for target in CALIBRATION_TARGETS.into_iter().filter(|&target| {
+            !matches!(
+                target,
+                iphone_mirror_rs::game::Target::Sprint
+                    | iphone_mirror_rs::game::Target::Button(Action::Custom(_))
+            )
+        }) {
             profile.set_point(target, Point { x: 0.5, y: 0.5 }).unwrap();
         }
         let state = GameState::new(profile.clone()).unwrap();
@@ -1022,11 +1100,80 @@ mod tests {
         app.key(KeyCode::ShiftLeft, true);
         events(&app);
         app.key(KeyCode::Escape, true);
-        assert_eq!(app.game_shifts, [false; 2]);
+        assert!(app.game_bindings.is_empty());
         assert!(matches!(
             events(&app).as_slice(),
             [HidEvent::ReleaseTouches { .. }]
         ));
+    }
+
+    #[test]
+    fn custom_mouse_aliases_do_not_release_a_still_held_keyboard_action() {
+        let mut app = with_game();
+        app.game
+            .as_mut()
+            .unwrap()
+            .profile
+            .bindings
+            .push(bindings::Binding::parse("mouse.Back", "reload").unwrap());
+        app.key(KeyCode::KeyR, true);
+        assert_eq!(events(&app).len(), 1);
+        assert!(app.game_mouse(MouseButton::Back, true));
+        app.key(KeyCode::KeyR, false);
+        assert!(events(&app).is_empty());
+        app.game_mouse(MouseButton::Back, false);
+        assert_eq!(events(&app).len(), 1);
+        assert!(app.game_bindings.is_empty());
+    }
+
+    #[test]
+    fn wheel_taps_expire_and_escape_discards_pending_releases() {
+        let mut app = with_game();
+        app.game
+            .as_mut()
+            .unwrap()
+            .profile
+            .bindings
+            .push(bindings::Binding::parse("wheel.Up", "fire").unwrap());
+        assert!(app.game_wheel(0.0, 1.0));
+        assert_eq!(events(&app).len(), 1);
+        assert!(app.advance_game().is_some());
+        app.game_wheel_deadlines[0] = Some(0);
+        app.advance_game();
+        assert_eq!(events(&app).len(), 1);
+        assert!(app.game_bindings.is_empty());
+        app.game_mouse(MouseButton::Left, true);
+        events(&app);
+        app.game_wheel(0.0, 1.0);
+        assert!(events(&app).is_empty());
+        app.game_wheel_deadlines[0] = Some(0);
+        app.advance_game();
+        assert!(events(&app).is_empty()); // Left mouse still holds fire.
+        app.game_wheel(0.0, 1.0);
+        app.key(KeyCode::Escape, true);
+        assert!(app.game_wheel_deadlines.iter().all(Option::is_none));
+        assert!(app.game_bindings.is_empty());
+        assert!(matches!(
+            events(&app).as_slice(),
+            [HidEvent::ReleaseTouches { .. }]
+        ));
+        assert!(app.advance_game().is_none());
+        assert!(events(&app).is_empty());
+    }
+
+    #[test]
+    fn f10_accepts_mouse_selection_without_sending_a_phone_click() {
+        let mut app = with_game();
+        app.key(KeyCode::F10, true);
+        events(&app); // Initial touch reset.
+        assert!(app.game_mouse(MouseButton::Other(9), true));
+        assert!(matches!(
+            app.game.as_ref().unwrap().calibration,
+            Some(crate::game_ui::Calibration::Single(_, Some(_)))
+        ));
+        assert!(events(&app).is_empty());
+        app.key(KeyCode::Escape, true);
+        assert!(app.game.as_ref().unwrap().calibration.is_none());
     }
 
     #[test]
@@ -1065,7 +1212,8 @@ mod tests {
         assert!(matches!(
             app.game.as_ref().and_then(|g| g.calibration.as_ref()),
             Some(crate::game_ui::Calibration::Single(
-                iphone_mirror_rs::game::Target::Button(Action::SecondaryGadget)
+                iphone_mirror_rs::game::Target::Button(Action::SecondaryGadget),
+                None
             ))
         ));
         app.key(KeyCode::Escape, true);
