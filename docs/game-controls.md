@@ -228,9 +228,23 @@ not a measurement of end-to-end input latency or a guarantee of PC-like aiming.
 
 Shift sprint has offline coverage for both Shift keys, release/exit cleanup,
 diagonals, rotations and preservation of simultaneous contacts. Its default
-radius did not reliably activate sprint in the user's live match. The explicit
-endpoint calibration and new vault/rappel/second-gadget/mount bindings have offline
-coverage but still require live HUD calibration and gameplay verification.
+radius did not reliably activate sprint in the user's live match. In a subsequent
+training check, calibrating an endpoint farther above the joystick activated
+the running indicator and lowered the weapon; releasing movement restored neutral.
+The endpoint is specific to that HUD and is not shipped as a default.
+Vault/rappel/second-gadget/mount bindings have offline coverage; contextual
+vault, mount and rappel still require gameplay verification at eligible surfaces.
+
+Additional custom targets were exercised in training: ping placed a visible
+marker; drone selection followed by fire deployed a drone and entered its view;
+movement, jump, observation entry and exit responded. Drone scan was pressed
+without an enemy in view, so enemy detection is not qualified. These targets
+are configured with F10, not built-in drone actions. The tested private profile
+uses Z for ping, 5 for drone selection, 7 for observation, 6 for observation exit,
+J for drone jump and T for scan. The viewer does not switch control contexts:
+combat fire/ADS/lean coordinates remain active in drone view. Do not treat this
+as a complete PC drone control scheme or assume those keys suit another HUD.
+
 Configurable key/mouse bindings have offline coverage for calibration and
 persistence, alias ownership, wheel expiry, and release cleanup. Arbitrary new
 HUD actions and individual mouse hardware still require live qualification.
