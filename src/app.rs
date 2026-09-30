@@ -494,7 +494,17 @@ impl App {
             return false;
         }
         match code {
-            KeyCode::F8 => {
+            KeyCode::Escape if self.game.as_ref().is_some_and(|g| g.calibration.is_some()) => {
+                if pressed {
+                    self.exit_game();
+                    if let Some(game) = &mut self.game {
+                        game.calibration = None;
+                    }
+                    self.update_title();
+                }
+                true
+            }
+            KeyCode::Escape | KeyCode::F8 => {
                 if pressed {
                     if self.game_active() {
                         self.exit_game();
@@ -519,19 +529,6 @@ impl App {
                     self.release();
                     if let Some(game) = &mut self.game {
                         game.start_target_calibration();
-                    }
-                    self.update_title();
-                }
-                true
-            }
-            KeyCode::Escape
-                if self.game_active()
-                    || self.game.as_ref().is_some_and(|g| g.calibration.is_some()) =>
-            {
-                if pressed {
-                    self.exit_game();
-                    if let Some(game) = &mut self.game {
-                        game.calibration = None;
                     }
                     self.update_title();
                 }
@@ -1064,6 +1061,43 @@ mod tests {
         assert!(matches!(sent.as_slice(), [HidEvent::ReleaseTouches { .. }]));
         app.release();
         assert!(events(&app).is_empty());
+    }
+
+    #[test]
+    fn escape_in_mirror_mode_uses_entry_path_and_key_release_does_not_toggle() {
+        let mut app = with_game();
+        app.exit_game();
+        events(&app);
+        app.key(KeyCode::KeyA, true);
+        events(&app);
+        assert_eq!(app.held_usages[4], 1);
+        app.key(KeyCode::Escape, false);
+        assert_eq!(app.held_usages[4], 1);
+        assert!(events(&app).is_empty());
+        app.key(KeyCode::Escape, true);
+        // Entry releases mirror inputs before requesting pointer lock. This
+        // headless fixture has no window/video, so capture must safely fail.
+        assert_eq!(app.held_usages[4], 0);
+        assert!(!app.game_active());
+        let sent = events(&app);
+        assert!(
+            matches!(sent.as_slice(), [HidEvent::Keyboard(report)] if report[1..31].iter().all(|&byte| byte == 0))
+        );
+        app.key(KeyCode::Escape, false);
+        assert!(events(&app).is_empty());
+    }
+
+    #[test]
+    fn escape_cancels_calibration_without_entering_game_and_no_profile_keeps_normal_escape() {
+        let mut app = with_game();
+        app.key(KeyCode::F10, true);
+        events(&app);
+        app.key(KeyCode::Escape, true);
+        assert!(app.game.as_ref().unwrap().calibration.is_none());
+        assert!(!app.game_active());
+        assert!(events(&app).is_empty());
+        app.game = None;
+        assert!(!app.game_key(KeyCode::Escape, true));
     }
     #[test]
     fn game_rotation_and_focus_cleanup_disable_capture() {

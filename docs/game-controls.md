@@ -12,7 +12,7 @@ future work, not additional supported bindings.
 iphone-mirror-rs --connection wifi --game-profile ~/.config/iphone-mirror-rs/rainbow-six.profile
 ```
 
-The normal mirror controls stay active until you press **F8**. A new profile
+The normal mirror controls stay active until you press **Escape** (or F8). A new profile
 needs calibration first. Use the game's training area or HUD editor where its
 controls are visible; menu buttons are not the gameplay HUD.
 
@@ -79,8 +79,10 @@ when Q/E are used. Recalibrate if changing this option changes HUD positions.
 
 ## Play
 
-Focus the mirror and press **F8**. The cursor locks and hides; **Escape** or F8
-releases every contact and restores it. Focus loss also exits. F1 releases game
+Focus the mirror and press **Escape**. The cursor locks and hides. Press Escape
+again to release every contact and restore the pointer; press it once more to
+resume with fresh contact state. F8 remains an alternate toggle. During
+calibration, Escape only cancels setup. Focus loss also exits. F1 releases game
 controls before sending Home. The viewer refuses capture if pointer locking is
 unavailable, rather than letting aiming stop at the desktop edge.
 Exiting discards queued game gestures and releases the contacts already sent
@@ -152,7 +154,7 @@ Releasing WASD immediately centers the joystick, then lifts its touch after
 reuses the origin; a longer pause starts a fresh gesture. This prevents idle
 movement touches from persisting indefinitely across gameplay screen changes.
 The viewer does not detect death/respawn; if controls still become stuck, use
-Escape then F8 to reset all contacts. Escape, focus loss and leaving game mode
+Escape twice to reset all contacts and resume. Escape, focus loss and leaving game mode
 always lift contacts immediately.
 Either Shift key works; sprint stays requested until both are released. Shift
 alone does not start movement. Releasing Shift restores normal displacement

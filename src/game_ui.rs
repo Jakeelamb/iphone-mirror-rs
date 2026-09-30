@@ -59,9 +59,9 @@ impl GameControls {
                 ),
             }
         } else if self.state.is_some() {
-            "GAME - ESC RELEASES MOUSE - F8 EXITS".into()
+            "GAME - ESC RELEASES MOUSE".into()
         } else if self.profile.calibrated() {
-            "F8 PLAY - F9 SETUP - F10 MAP INPUT".into()
+            "ESC PLAY - F9 SETUP - F10 MAP INPUT".into()
         } else {
             "F9 CALIBRATE GAME CONTROLS".into()
         }
