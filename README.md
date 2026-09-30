@@ -66,6 +66,19 @@ Rebuild and repeat that install command after updating. To uninstall, remove
 `~/.local/bin/iphone-mirror-rs`. Pairing records and developer images are separate
 from the application and remain on the computer.
 
+For a desktop application entry, also install the logging launcher:
+
+```sh
+install -Dm755 scripts/launch-desktop.sh ~/.local/bin/iphone-mirror-launch
+```
+
+Set the entry's `Exec` to the absolute path of `iphone-mirror-launch`, followed
+by the viewer options. It writes private logs to
+`${XDG_STATE_HOME:-~/.local/state}/iphone-mirror-rs/launch-*.log` and shows a
+failure notification when `notify-send` is available. Keep only one viewer open:
+a second instance exits because the first owns the device lock. Use
+`--connection auto` to try USB first and fall back to Wi-Fi at startup.
+
 ## Controls
 
 | Input | Action |
