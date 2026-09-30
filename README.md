@@ -79,6 +79,14 @@ failure notification when `notify-send` is available. Keep only one viewer open:
 a second instance exits because the first owns the device lock. Use
 `--connection auto` to try USB first and fall back to Wi-Fi at startup.
 
+Desktop logs include full session error chains, Rust panic backtraces, and a
+final `exit_status` (zero means normal shutdown). Each completed log also has a
+`.log.exit` receipt. The launcher retains twenty completed runs and preserves
+active logs. Native fatal signals may still require `coredumpctl`; logs cannot
+recover a stack after an OOM kill or abrupt power loss. Review logs before
+sharing them; never include pairing records. The launcher must be reinstalled
+after updates, just like the binary.
+
 ## Controls
 
 | Input | Action |

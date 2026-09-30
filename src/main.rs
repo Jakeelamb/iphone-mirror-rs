@@ -45,6 +45,7 @@ fn main() -> Result<()> {
     } else {
         tracing_subscriber::fmt()
             .with_env_filter(filter)
+            .with_ansi(false)
             .with_target(false)
             .init();
     }
@@ -115,8 +116,8 @@ fn main() -> Result<()> {
         Ok(()) if !gui_failed => Ok(()),
         Ok(()) => anyhow::bail!("GPU viewer failed"),
         Err(error) => {
-            tracing::error!(error = %error, "session error");
-            anyhow::bail!("native mirror session did not complete successfully")
+            tracing::error!(error = %format!("{error:#}"), "session error");
+            Err(error.context("native mirror session did not complete successfully"))
         }
     }
 }

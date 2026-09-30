@@ -111,3 +111,11 @@ one. `RUST_LOG=iphone_mirror_rs=trace` enables detailed stage timing; default
 application info logging is preferable for comparison runs. The optional marker
 probe reads synthetic pixels transiently and does not save them. Pairing files
 remain in the user's existing data directory, outside the repository.
+
+The optional desktop launcher captures stdout/stderr in private mode-0600 logs,
+enables `RUST_BACKTRACE=1` unless overridden, and records the process exit status.
+Session errors retain the full context chain. Completed runs have `.log.exit`
+receipts; twenty are retained, while unfinished logs are preserved. An exit status
+alone does not prove a panic: connection errors also exit nonzero. Match the final
+error to the timestamp and check `coredumpctl` for native fatal signals. The
+launcher regression checks run with `sh tests/desktop-launcher.sh`.
