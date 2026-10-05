@@ -1,4 +1,5 @@
 mod app;
+mod feedback;
 mod game_ui;
 mod options;
 mod session;

@@ -85,7 +85,11 @@ final `exit_status` (zero means normal shutdown). Each completed log also has a
 active logs. Native fatal signals may still require `coredumpctl`; logs cannot
 recover a stack after an OOM kill or abrupt power loss. Review logs before
 sharing them; never include pairing records. The launcher must be reinstalled
-after updates, just like the binary.
+after updates, just like the binary. Logs also include recent
+frame rates, 33/50 ms submission gaps and RTCP send timeouts; see
+[performance diagnostics](docs/performance.md#rtcp-stall-handling). One isolated
+RTCP deadline no longer closes the viewer; repeated failures still end the
+session with an actionable error.
 
 ## Controls
 

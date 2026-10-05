@@ -2,7 +2,7 @@
 use crate::video::DecodedFrame;
 use std::array;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const BUCKETS: usize = 256;
 
@@ -76,6 +76,10 @@ pub struct Metrics {
     pub clipped_mouse_events: AtomicU64,
     pub input_queue_high_water: AtomicU64,
     pub input_coalesced: AtomicU64,
+    pub feedback_sent: AtomicU64,
+    pub feedback_timeouts: AtomicU64,
+    pub submission_gaps_33ms: AtomicU64,
+    pub submission_gaps_50ms: AtomicU64,
     /// Latest retained input snapshot enqueue to local HID write start.
     pub input_queue_age: Histogram,
     /// Age of its queue slot, including any replaced motion snapshots.
@@ -99,7 +103,63 @@ pub struct Metrics {
     stamp_y: AtomicU64,
 }
 
+/// One reporter owns its baseline; sampling does not reset shared counters.
+pub struct RateWindow {
+    at: Instant,
+    totals: [u64; 6],
+}
+
+impl RateWindow {
+    pub fn new(at: Instant) -> Self {
+        Self { at, totals: [0; 6] }
+    }
+
+    fn sample(&mut self, now: Instant, totals: [u64; 6]) -> (f64, [u64; 6]) {
+        let seconds = now.saturating_duration_since(self.at).as_secs_f64();
+        let delta = array::from_fn(|i| totals[i].saturating_sub(self.totals[i]));
+        self.at = now;
+        self.totals = totals;
+        (seconds, delta)
+    }
+}
+
 impl Metrics {
+    pub fn record_submission_interval(&self, interval: Duration) {
+        self.submit_interval.record(interval);
+        if interval >= Duration::from_millis(33) {
+            self.submission_gaps_33ms.fetch_add(1, Ordering::Relaxed);
+        }
+        if interval >= Duration::from_millis(50) {
+            self.submission_gaps_50ms.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub fn report_rates(&self, window: &mut RateWindow) {
+        let totals = [
+            &self.decoded,
+            &self.submitted,
+            &self.replaced,
+            &self.submission_gaps_33ms,
+            &self.submission_gaps_50ms,
+            &self.feedback_timeouts,
+        ]
+        .map(|counter| counter.load(Ordering::Relaxed));
+        let (seconds, delta) = window.sample(Instant::now(), totals);
+        if seconds < 0.001 {
+            return;
+        }
+        tracing::info!(
+            window_seconds = seconds,
+            decoded_fps = delta[0] as f64 / seconds,
+            submitted_fps = delta[1] as f64 / seconds,
+            replaced_frames = delta[2],
+            submission_gaps_33ms = delta[3],
+            submission_gaps_50ms = delta[4],
+            feedback_timeouts = delta[5],
+            "recent frame pacing; host submissions are not display scanout"
+        );
+    }
+
     /// Optional synthetic-page timing probe. It never saves pixels or text.
     /// Green/32 binary cells/magenta must span the whole encoded picture.
     pub fn record_source_stamp(&self, frame: &DecodedFrame) {
@@ -164,6 +224,8 @@ impl Metrics {
             clipped_mouse_events = self.clipped_mouse_events.load(Ordering::Relaxed),
             render_attempts = self.render_attempts.load(Ordering::Relaxed),
             surface_timeouts = self.surface_timeouts.load(Ordering::Relaxed),
+            feedback_sent = self.feedback_sent.load(Ordering::Relaxed),
+            feedback_timeouts = self.feedback_timeouts.load(Ordering::Relaxed),
             "bounded input and render counters"
         );
         // Each event has a fixed label and numeric fields only. Histograms use
@@ -197,6 +259,27 @@ impl Metrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rate_windows_isolate_hitches_and_use_actual_elapsed_time() {
+        let start = Instant::now();
+        let mut window = RateWindow::new(start);
+        let (seconds, delta) =
+            window.sample(start + Duration::from_secs(2), [120, 118, 2, 1, 1, 0]);
+        assert_eq!(seconds, 2.0);
+        assert_eq!(delta, [120, 118, 2, 1, 1, 0]);
+        let (seconds, delta) =
+            window.sample(start + Duration::from_secs(3), [180, 178, 2, 1, 1, 0]);
+        assert_eq!(seconds, 1.0);
+        assert_eq!(delta, [60, 60, 0, 0, 0, 0]);
+        let metrics = Metrics::default();
+        for ms in [16, 32, 33, 49, 50, 100] {
+            metrics.record_submission_interval(Duration::from_millis(ms));
+        }
+        assert_eq!(metrics.submit_interval.samples(), 6);
+        assert_eq!(metrics.submission_gaps_33ms.load(Ordering::Relaxed), 4);
+        assert_eq!(metrics.submission_gaps_50ms.load(Ordering::Relaxed), 2);
+    }
 
     #[test]
     fn percentiles_cover_empty_bucket_edges_and_overflow() {

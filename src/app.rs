@@ -424,8 +424,7 @@ impl App {
         self.metrics.submitted.fetch_add(1, Ordering::Relaxed);
         if let Some(previous) = self.last_submission.replace(submitted_at) {
             self.metrics
-                .submit_interval
-                .record(submitted_at.saturating_duration_since(previous));
+                .record_submission_interval(submitted_at.saturating_duration_since(previous));
         }
         if let Some(frame) = &self.frame {
             self.metrics

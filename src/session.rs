@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use iphone_mirror_rs::device::{DeviceOptions, DeviceSession, HidChannels, OrientationSource};
 use iphone_mirror_rs::input::{HidEvent, InputQueue, QueuedInput, TouchPhase};
-use iphone_mirror_rs::metrics::Metrics;
-use iphone_mirror_rs::rtp::{HevcDepacketizer, picture_loss_indication, receiver_report};
+use iphone_mirror_rs::metrics::{Metrics, RateWindow};
+use iphone_mirror_rs::rtp::HevcDepacketizer;
 use iphone_mirror_rs::video::{DecodeMode, Decoder, LatestFrame};
 use tokio::sync::{Notify, mpsc, watch};
 use winit::event_loop::EventLoopProxy;
@@ -354,6 +354,7 @@ pub async fn run(
             return Err(error);
         }
     };
+    let stream = Arc::new(stream);
     let hid = match session.open_input().await {
         Ok(hid) => hid,
         Err(error) => {
@@ -421,7 +422,20 @@ pub async fn run(
         Ok(())
     });
 
+    let (feedback_tx, feedback_rx) = watch::channel(crate::feedback::Request::default());
+    let mut feedback_request = crate::feedback::Request::default();
+    let mut feedback_result = None;
+    let mut feedback_task = tokio::spawn(crate::feedback::worker(
+        stream.clone(),
+        stream.info.local_ssrc,
+        stream.info.remote_ssrc,
+        feedback_rx,
+        input_stop.subscribe(),
+        shared.metrics.clone(),
+        Duration::from_millis(250),
+    ));
     let mut depacketizer = HevcDepacketizer::default();
+    let mut rate_window = RateWindow::new(Instant::now());
     let mut report = tokio::time::interval(Duration::from_secs(1));
     report.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut recovery = tokio::time::interval(Duration::from_millis(500));
@@ -440,14 +454,17 @@ pub async fn run(
                     input_result = Some(finished.context("input task failed").and_then(|result| result));
                     break;
                 }
+                finished = &mut feedback_task => {
+                    feedback_result = Some(finished.context("RTCP feedback task failed").and_then(|result| result));
+                    break;
+                }
                 _ = report.tick() => {
+                    shared.metrics.report_rates(&mut rate_window);
                     shared.metrics.report();
                     if last_packet.elapsed() > Duration::from_secs(10) { bail!("video packet deadline exceeded"); }
                     if decode.is_finished() { bail!("decoder worker ended"); }
-                    let rr = receiver_report(stream.info.local_ssrc, stream.info.remote_ssrc,
-                        depacketizer.stats().highest_sequence);
-                    tokio::time::timeout(Duration::from_millis(250), stream.send_rtcp(&rr)).await
-                        .context("RTCP receiver report send deadline exceeded")??;
+                    feedback_request.sequence = depacketizer.stats().highest_sequence;
+                    feedback_tx.send_replace(feedback_request);
                 }
                 _ = recovery.tick() => {
                     let now = Instant::now();
@@ -463,9 +480,9 @@ pub async fn run(
                     // This timer runs even if every AU is incomplete or no AU
                     // arrives. Packet-triggered PLI alone cannot recover that case.
                     if !first_frame && last_pli.elapsed() >= Duration::from_millis(500) {
-                        tokio::time::timeout(Duration::from_millis(250), stream.send_rtcp(
-                            &picture_loss_indication(stream.info.local_ssrc, stream.info.remote_ssrc))).await
-                            .context("keyframe request send deadline exceeded")??;
+                        feedback_request.sequence = depacketizer.stats().highest_sequence;
+                        feedback_request.keyframe_generation = feedback_request.keyframe_generation.wrapping_add(1);
+                        feedback_tx.send_replace(feedback_request);
                         last_pli = now;
                     }
                 }
@@ -527,11 +544,27 @@ pub async fn run(
             }
         }
     }
+    let feedback_cleanup = match feedback_result {
+        Some(result) => result,
+        None => match tokio::time::timeout(Duration::from_secs(1), &mut feedback_task).await {
+            Ok(result) => result
+                .context("RTCP feedback task failed")
+                .and_then(|result| result),
+            Err(_) => {
+                feedback_task.abort();
+                let _ = feedback_task.await;
+                Err(anyhow::anyhow!(
+                    "RTCP feedback worker shutdown deadline exceeded"
+                ))
+            }
+        },
+    };
     let stream_cleanup = tokio::time::timeout(Duration::from_secs(5), session.stop()).await;
     let decoder_result = decode.await.context("decoder thread failed")?;
     shared.metrics.report();
     result?;
     input_cleanup?;
+    feedback_cleanup?;
     stream_cleanup.context("stream cleanup deadline exceeded")??;
     decoder_result
 }

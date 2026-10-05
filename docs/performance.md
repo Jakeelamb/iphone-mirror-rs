@@ -154,7 +154,17 @@ arrival or click-to-response latency. Midpoint clock synchronization has
 uncertainty from request asymmetry and scheduling; record the page's selected
 RTT and its approximate half-RTT uncertainty with the result.
 
-Histograms and counts accumulate from startup; the tool does not discard a
+The `recent frame pacing` event reports rates and deltas over the actual time
+since its previous sample (normally one second). `decoded_fps` and
+`submitted_fps` distinguish decoder output from fresh host submissions.
+`submission_gaps_33ms` and `submission_gaps_50ms` count intervals between fresh
+submissions at least those durations; the 50 ms count is a subset of the 33 ms
+count. Retained-picture UI redraws do not enter these counts. Static content,
+setup and deliberate pauses can also create gaps; they are not automatically
+network packet loss. `replaced_frames` counts mailbox replacements in that
+window, and `feedback_timeouts` counts RTCP local-send deadlines.
+
+Histograms and other counts accumulate from startup; the tool does not discard a
 warmup interval automatically. Percentiles report upper edges of 1 ms buckets.
 The value 256 is an overflow marker for samples at least 255 ms, not an exact
 256 ms latency. A zero statistic can mean there were no samples. Periodic
@@ -334,3 +344,21 @@ after a timeout, so a later successful retry counts once. Repeated UI redraws
 do not count as fresh video. Existing stage metrics remain host observations;
 none establishes actual presentation or input-to-photon latency. Lower-level
 jktcp queue ages and optical/Wayland presentation feedback remain future work.
+
+## RTCP stall handling
+
+Receiver reports and keyframe requests run in a separate worker from video
+reception. One watch slot retains the latest sequence number and keyframe
+request generation while feedback is busy; it does not accumulate an application
+queue of obsolete requests. A 250 ms send timeout is logged and counted without
+immediately closing the viewer. A later successful batch clears the failure
+streak; three consecutive timed-out batches or a transport error end the session
+with an explicit error. Shutdown cancels and joins the feedback worker before
+tearing down the tunnel.
+
+This removes a receive-loop delay and the previous exit on a single RTCP
+send timeout. It does not repair a disconnected Wi-Fi link or prove that a
+feedback packet reached the phone: the send acknowledgment is local. Mock-sink
+regressions cover coalescing, transient timeout recovery, persistent failure
+and interrupting a blocked send during shutdown. Real gaming latency and
+reliability still require a matched live workload on the updated binary.
