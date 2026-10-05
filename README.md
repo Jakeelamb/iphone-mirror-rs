@@ -91,6 +91,11 @@ frame rates, 33/50 ms submission gaps and RTCP send timeouts; see
 RTCP deadline no longer closes the viewer; repeated failures still end the
 session with an actionable error.
 
+For bounded performance comparisons, use `--duration 60 --benchmark-out run.json`
+and a unique `--trace run.log`. Select the renderer with
+`--renderer-gpu auto|amd|nvidia|intel`; decoding is chosen independently.
+See [benchmark instructions and measurement limits](docs/performance.md#repeatable-benchmark-reports-and-renderer-selection).
+
 ## Controls
 
 | Input | Action |

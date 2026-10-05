@@ -89,6 +89,14 @@ impl VideoStream {
 }
 
 impl DeviceSession {
+    pub fn transport_name(&self) -> &'static str {
+        if self._pairing.is_some() {
+            "wifi"
+        } else {
+            "usb"
+        }
+    }
+
     /// Clone only the transport handle; connection and queries happen in the
     /// independent orientation task, never in the video receive loop.
     pub fn orientation_source(&self) -> Result<OrientationSource> {

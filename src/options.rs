@@ -12,6 +12,7 @@ pub struct Options {
     pub duration: Option<Duration>,
     pub headless: bool,
     pub trace: Option<PathBuf>,
+    pub benchmark_out: Option<PathBuf>,
     pub measure_stamp: bool,
     pub game_profile: Option<PathBuf>,
     pub presentation: PresentationOptions,
@@ -22,7 +23,7 @@ impl Options {
         Self::parse_from(std::env::args().skip(1))
     }
 
-    fn parse_from(mut args: impl Iterator<Item = String>) -> Result<Option<Self>> {
+    pub(crate) fn parse_from(mut args: impl Iterator<Item = String>) -> Result<Option<Self>> {
         let mut options = Self {
             device: DeviceOptions {
                 connection: ConnectionMode::Auto,
@@ -34,6 +35,7 @@ impl Options {
             duration: None,
             headless: false,
             trace: None,
+            benchmark_out: None,
             measure_stamp: false,
             game_profile: None,
             presentation: PresentationOptions::default(),
@@ -42,10 +44,10 @@ impl Options {
             match arg.as_str() {
                 "--help" | "-h" => {
                     println!(
-                        "iphone-mirror-rs\n\nNative iPhone video and input. Requires an already paired, unlocked iPhone.\n\n  --connection auto|usb|wifi  Transport (default auto)\n  --address IP:PORT           Explicit Wi-Fi endpoint\n  --pairing-file PATH         Existing CoreDevice pairing record\n  --serial ID                 Select one paired device\n  --decoder auto|cuda|vaapi|software  Decoder preference (default auto)\n  --software                 Alias for --decoder software\n  --headless                 Decode and trace without opening a window\n  --duration SECONDS         Stop after 0.1–86400 s, including setup\n  --trace PATH               Write timing/counter traces to a new file\n  --measure-stamp            Measure synthetic latency-page frame timestamps\n  --game-profile PATH        Load/create calibrated game controls (F9 setup, F8 play)\n\nControls: click/drag, wheel, keyboard; house button or F1 Home; F2 Spotlight.\nClosing the window releases input and stops the stream."
+                        "iphone-mirror-rs\n\nNative iPhone video and input. Requires an already paired, unlocked iPhone.\n\n  --connection auto|usb|wifi  Transport (default auto)\n  --address IP:PORT           Explicit Wi-Fi endpoint\n  --pairing-file PATH         Existing CoreDevice pairing record\n  --serial ID                 Select one paired device\n  --decoder auto|cuda|vaapi|software  Decoder preference (default auto)\n  --software                 Alias for --decoder software\n  --headless                 Decode and trace without opening a window\n  --duration SECONDS         Stop after 0.1–86400 s, including setup\n  --trace PATH               Write timing/counter traces to a new file\n  --benchmark-out PATH       New JSON report; requires --duration\n  --measure-stamp            Measure synthetic latency-page frame timestamps\n  --game-profile PATH        Load/create calibrated game controls (F9 setup, F8 play)\n\nControls: click/drag, wheel, keyboard; house button or F1 Home; F2 Spotlight.\nClosing the window releases input and stops the stream."
                     );
                     println!(
-                        "\nPresentation experiments (baseline: auto, 1, off):\n  --present-mode auto|immediate|mailbox|fifo\n  --frame-latency 1|2        Backend queue-depth hint, not measured latency\n  --pre-present-notify on|off  Wayland frame-callback experiment\nExplicit unsupported presentation modes fail instead of silently falling back."
+                        "\nPresentation experiments (baseline: auto, 1, off):\n  --renderer-gpu auto|amd|nvidia|intel\n  --present-mode auto|immediate|mailbox|fifo\n  --frame-latency 1|2        Backend queue-depth hint, not measured latency\n  --pre-present-notify on|off  Wayland frame-callback experiment\nExplicit unsupported presentation modes fail instead of silently falling back."
                     );
                     return Ok(None);
                 }
@@ -84,7 +86,10 @@ impl Options {
                     };
                 }
                 "--software" => options.decoder = DecodeMode::Software,
-                "--present-mode" | "--frame-latency" | "--pre-present-notify" => {
+                "--renderer-gpu"
+                | "--present-mode"
+                | "--frame-latency"
+                | "--pre-present-notify" => {
                     let value = args
                         .next()
                         .with_context(|| format!("{arg} requires a value"))?;
@@ -108,6 +113,11 @@ impl Options {
                     }
                     options.duration = Some(Duration::from_secs_f64(seconds));
                 }
+                "--benchmark-out" => {
+                    options.benchmark_out = Some(PathBuf::from(
+                        args.next().context("--benchmark-out requires a path")?,
+                    ));
+                }
                 "--trace" => {
                     options.trace = Some(PathBuf::from(
                         args.next().context("--trace requires a path")?,
@@ -115,6 +125,12 @@ impl Options {
                 }
                 _ => bail!("unknown option; use --help"),
             }
+        }
+        if options.benchmark_out.is_some() && options.duration.is_none() {
+            bail!("--benchmark-out requires --duration for a bounded repeatable run");
+        }
+        if options.benchmark_out.is_some() && options.benchmark_out == options.trace {
+            bail!("benchmark output and trace must be different files");
         }
         if options.headless && options.game_profile.is_some() {
             bail!("--game-profile requires a window");
@@ -133,6 +149,40 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Options> {
         Options::parse_from(args.iter().map(|arg| (*arg).to_owned()))?.context("expected options")
+    }
+
+    #[test]
+    fn gpu_and_benchmark_options_are_explicit_and_bounded() -> Result<()> {
+        let options = parse(&[
+            "--renderer-gpu",
+            "nvidia",
+            "--benchmark-out",
+            "run.json",
+            "--duration",
+            "60",
+        ])?;
+        assert_eq!(
+            options.presentation.gpu,
+            iphone_mirror_rs::video::RendererGpu::Nvidia
+        );
+        assert_eq!(options.benchmark_out, Some(PathBuf::from("run.json")));
+        for args in [
+            vec!["--renderer-gpu", "unknown"],
+            vec!["--renderer-gpu"],
+            vec!["--headless", "--renderer-gpu", "amd"],
+            vec!["--benchmark-out", "run.json"],
+            vec![
+                "--duration",
+                "10",
+                "--benchmark-out",
+                "same",
+                "--trace",
+                "same",
+            ],
+        ] {
+            assert!(parse(&args).is_err(), "accepted {args:?}");
+        }
+        Ok(())
     }
 
     #[test]

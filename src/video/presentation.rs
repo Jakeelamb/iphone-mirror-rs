@@ -10,9 +10,30 @@ pub enum PresentPreference {
     Fifo,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RendererGpu {
+    #[default]
+    Auto,
+    Amd,
+    Nvidia,
+    Intel,
+}
+
+impl RendererGpu {
+    pub fn vendor(self) -> Option<u32> {
+        match self {
+            Self::Auto => None,
+            Self::Amd => Some(0x1002),
+            Self::Nvidia => Some(0x10de),
+            Self::Intel => Some(0x8086),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PresentationOptions {
     pub mode: PresentPreference,
+    pub gpu: RendererGpu,
     /// A backend-clamped hint, not a measured number of queued pictures.
     pub frame_latency: u32,
     pub pre_present_notify: bool,
@@ -22,6 +43,7 @@ impl Default for PresentationOptions {
     fn default() -> Self {
         Self {
             mode: PresentPreference::Auto,
+            gpu: RendererGpu::Auto,
             frame_latency: 1,
             pre_present_notify: false,
         }
@@ -32,6 +54,16 @@ impl PresentationOptions {
     /// Shared by the real viewer and the device-free surface fixture.
     pub fn set_option(&mut self, flag: &str, value: &str) -> Result<()> {
         match flag {
+            "--renderer-gpu" => {
+                self.gpu = match value {
+                    "auto" => RendererGpu::Auto,
+                    "amd" => RendererGpu::Amd,
+                    "nvidia" => RendererGpu::Nvidia,
+                    "intel" => RendererGpu::Intel,
+                    _ => bail!("--renderer-gpu requires auto, amd, nvidia or intel"),
+                };
+            }
+
             "--present-mode" => {
                 self.mode = match value {
                     "auto" => PresentPreference::Auto,

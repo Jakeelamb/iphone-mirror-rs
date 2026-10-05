@@ -345,6 +345,9 @@ pub async fn run(
         tokio::time::timeout(Duration::from_secs(35), DeviceSession::connect(&options))
             .await
             .context("device connection deadline exceeded")??;
+    shared
+        .metrics
+        .set_context("transport", session.transport_name().to_owned());
     // Keep the verified protocol order: iOS 27 rejected media startup with
     // error 9022 when HID was registered first. Register only after streaming.
     let stream = match session.start_video().await {
@@ -402,6 +405,7 @@ pub async fn run(
     let latest = shared.latest.clone();
     let proxy = shared.proxy.clone();
     let decode = tokio::task::spawn_blocking(move || -> Result<()> {
+        let mut backend_recorded = false;
         while let Some(packet) = encoded_rx.blocking_recv() {
             packet.record_handoff(&metrics, Instant::now());
             if packet.reset {
@@ -417,6 +421,10 @@ pub async fn run(
                 }
             })?;
             metrics.decode.record(started.elapsed());
+            if !backend_recorded && let Some(backend) = decoder.output_backend() {
+                metrics.set_context("decoder", backend);
+                backend_recorded = true;
+            }
             let _ = free_tx.try_send(packet.bytes);
         }
         Ok(())

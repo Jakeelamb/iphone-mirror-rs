@@ -63,6 +63,7 @@ impl Histogram {
 
 #[derive(Default)]
 pub struct Metrics {
+    pub run_context: std::sync::Mutex<std::collections::BTreeMap<&'static str, String>>,
     pub measure_stamp: AtomicBool,
     pub packets: AtomicU64,
     pub bytes: AtomicU64,
@@ -124,6 +125,12 @@ impl RateWindow {
 }
 
 impl Metrics {
+    pub fn set_context(&self, key: &'static str, value: String) {
+        if let Ok(mut context) = self.run_context.lock() {
+            context.insert(key, value);
+        }
+    }
+
     pub fn record_submission_interval(&self, interval: Duration) {
         self.submit_interval.record(interval);
         if interval >= Duration::from_millis(33) {

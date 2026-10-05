@@ -246,7 +246,7 @@ fn main() -> Result<()> {
         match argument.as_str() {
             "--hardware" => mode = DecodeMode::Auto,
             "--animate" => animate = true,
-            "--present-mode" | "--frame-latency" | "--pre-present-notify" => {
+            "--renderer-gpu" | "--present-mode" | "--frame-latency" | "--pre-present-notify" => {
                 let value = arguments
                     .next()
                     .with_context(|| format!("{argument} requires a value"))?;

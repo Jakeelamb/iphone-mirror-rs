@@ -362,3 +362,54 @@ feedback packet reached the phone: the send acknowledgment is local. Mock-sink
 regressions cover coalescing, transient timeout recovery, persistent failure
 and interrupting a blocked send during shutdown. Real gaming latency and
 reliability still require a matched live workload on the updated binary.
+
+## Repeatable benchmark reports and renderer selection
+
+Use a unique output path for each bounded run. Keep the same training scene,
+HUD, workload and desktop conditions, and change one setting at a time:
+
+```sh
+iphone-mirror-rs --duration 60 --connection usb \
+  --decoder vaapi --renderer-gpu amd \
+  --game-profile ~/.config/iphone-mirror-rs/rainbow-six.profile \
+  --benchmark-out /tmp/mirror-amd-usb-01.json \
+  --trace /tmp/mirror-amd-usb-01.log
+```
+
+`--renderer-gpu auto` preserves the low-power adapter preference. Explicit
+`amd`, `nvidia` and `intel` select a surface-compatible Vulkan adapter by PCI
+vendor. An unavailable or ambiguous vendor fails rather than silently choosing
+another GPU. The same option works in `render_fixture`. This selects only the
+renderer; choose decoding independently with `--decoder`. Decoder preferences
+can fall back, so check the observed decoder in the report and trace. Selecting
+the same vendor does not remove the existing CPU download/upload path.
+
+`--benchmark-out` requires `--duration` and creates a private mode-0600 JSON
+report without overwriting an existing file. `requested` records experimental
+settings; `observed` records the actual renderer, negotiated transport and
+first decoded output backend when available. Reports omit device identifiers,
+addresses, credentials, input values and frame contents. Full trace files still
+need review before sharing.
+
+`results.session_success` means the viewer returned successfully, not that a
+benchmark qualified. Check `video_observed` and `presentation_observed` too.
+Headless runs cannot measure presentation. Missing timing samples and undefined
+cadence are null. A failed startup still produces a report once output reservation
+succeeds. Abrupt kills can leave an incomplete file. Existing files are never
+reused; traces and reports must have distinct paths.
+
+Timings cover the entire observed session, with no warmup exclusion. Requested
+duration includes connection setup; total elapsed time also includes cleanup or
+an early user close. `mean_submission_cadence_fps` is the reciprocal of mean
+spacing between fresh host submissions, excluding time before the first and
+after the last submission. It is not whole-run throughput or measured display
+FPS. Histograms use 1 ms bucket upper edges; 256 denotes overflow at >=255 ms.
+Neither input write completion nor host submission establishes end-to-end
+latency.
+
+Repeat each condition at least three times and return to baseline between
+experiments. Compare submission p95/p99, 33/50 ms gaps, receive-to-submit tails,
+decoder/handoff timings and feedback timeouts. Inspect the recent frame-pacing
+trace events for when hitches occur. Record the workload alongside each report;
+a static menu and moving gameplay are not comparable workloads. No GPU path is
+claimed faster until these comparisons have been run on the actual device.

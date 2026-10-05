@@ -64,6 +64,16 @@ unsafe extern "C" fn choose_format(
 }
 
 impl Decoder {
+    pub fn output_backend(&self) -> Option<String> {
+        self.hardware_active().map(|active| {
+            if active {
+                format!("{:?}", *self.hardware_format)
+            } else {
+                "software".to_owned()
+            }
+        })
+    }
+
     /// None before the first output frame; then the actual selected backend.
     pub fn hardware_active(&self) -> Option<bool> {
         self.last_pixel_format.map(|format| {

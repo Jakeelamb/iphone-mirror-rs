@@ -43,6 +43,7 @@ pub struct RenderSample {
 /// GPU YUV conversion and presentation; textures are recreated only on format
 /// changes. Hardware decode currently includes a CPU download/upload boundary.
 pub struct Renderer {
+    pub description: String,
     window: Arc<Window>,
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -68,14 +69,32 @@ impl Renderer {
         let surface = instance
             .create_surface(window.clone())
             .context("create GPU surface")?;
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::LowPower,
-                force_fallback_adapter: false,
-                compatible_surface: Some(&surface),
-            })
-            .await
-            .context("select GPU adapter")?;
+        let adapter = if let Some(vendor) = options.gpu.vendor() {
+            let mut matches = instance
+                .enumerate_adapters(wgpu::Backends::VULKAN)
+                .into_iter()
+                .filter(|adapter| {
+                    adapter.get_info().vendor == vendor && adapter.is_surface_supported(&surface)
+                });
+            let adapter = matches
+                .next()
+                .with_context(|| format!("no surface-compatible {:?} renderer GPU", options.gpu))?;
+            ensure!(
+                matches.next().is_none(),
+                "multiple surface-compatible {:?} GPUs; explicit vendor selection is ambiguous",
+                options.gpu
+            );
+            adapter
+        } else {
+            instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::LowPower,
+                    force_fallback_adapter: false,
+                    compatible_surface: Some(&surface),
+                })
+                .await
+                .context("select GPU adapter")?
+        };
         let info = adapter.get_info();
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
@@ -209,6 +228,7 @@ impl Renderer {
             pre_present_notify = options.pre_present_notify,
             "GPU renderer ready; configuration does not establish physical scanout behavior");
         Ok(Self {
+            description: format!("{} / {:?} / {:?}", info.name, info.backend, present_mode),
             window,
             surface,
             device,

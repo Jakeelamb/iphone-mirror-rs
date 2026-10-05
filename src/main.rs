@@ -1,4 +1,5 @@
 mod app;
+mod benchmark;
 mod feedback;
 mod game_ui;
 mod options;
@@ -20,6 +21,20 @@ fn main() -> Result<()> {
     let Some(options) = options::Options::parse()? else {
         return Ok(());
     };
+    let metrics = Arc::new(Metrics::default());
+    let benchmark = options
+        .benchmark_out
+        .as_ref()
+        .map(|path| benchmark::Benchmark::new(path, &options))
+        .transpose()?;
+    let result = run(options, metrics.clone());
+    if let Some(benchmark) = benchmark {
+        benchmark.finish(&metrics, result.is_ok())?;
+    }
+    result
+}
+
+fn run(options: options::Options, metrics: Arc<Metrics>) -> Result<()> {
     let game = options
         .game_profile
         .clone()
@@ -56,7 +71,6 @@ fn main() -> Result<()> {
         .build()?;
     let (stop_tx, stop_rx) = watch::channel(false);
     let latest = Arc::new(LatestFrame::new());
-    let metrics = Arc::new(Metrics::default());
     metrics
         .measure_stamp
         .store(options.measure_stamp, std::sync::atomic::Ordering::Relaxed);

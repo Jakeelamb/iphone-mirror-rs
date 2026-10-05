@@ -685,6 +685,8 @@ impl ApplicationHandler<AppEvent> for App {
         })();
         match result {
             Ok((window, renderer)) => {
+                self.metrics
+                    .set_context("renderer", renderer.description.clone());
                 self.window = Some(window);
                 self.renderer = Some(renderer);
             }

@@ -10,5 +10,5 @@ pub use decoder::{DecodeMode, Decoder};
 pub use frame::{DecodedFrame, LatestFrame};
 pub use layout::{Rect, ViewerLayout};
 pub use orientation::{displayed_size, visual_rotation};
-pub use presentation::{PresentPreference, PresentationOptions};
+pub use presentation::{PresentPreference, PresentationOptions, RendererGpu};
 pub use renderer::{RenderSample, Renderer};
